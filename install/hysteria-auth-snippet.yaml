@@ -1,0 +1,11 @@
+auth:
+  type: http
+  http:
+    url: http://127.0.0.1:18081/internal/hysteria/auth
+
+# HY_SNI is substituted by proxy-setup.sh.
+masquerade:
+  type: proxy
+  proxy:
+    url: https://HY_SNI
+    rewriteHost: true

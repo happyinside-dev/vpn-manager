@@ -1,0 +1,1195 @@
+--- "/mnt/data/\320\222\321\201\321\202\320\260\320\262\320\273\320\265\320\275\320\275\321\213\320\271 \321\202\320\265\320\272\321\201\321\202(4).txt"	2026-11-01 14:08:40.703108988 +0000
++++ /mnt/data/proxy-manager/install/proxy-setup.sh	2026-11-01 14:12:49.162255834 +0000
+@@ -5,13 +5,16 @@
+ # Examples:
+ #   bash proxy-setup.sh
+ #   bash proxy-setup.sh -sni "example.com"
++#   bash proxy-setup.sh -xsni "www.microsoft.com" -hsni "www.apple.com"
+ #   bash proxy-setup.sh -s
+ #   bash proxy-setup.sh -s -sni "example.com"
+ #
+ # Options:
+-#   -sni DOMAIN, --sni DOMAIN   Use DOMAIN as REALITY SNI/target.
+-#   -s, --keep-secrets         Reuse existing VPN credentials/certificate.
+-#   -h, --help                 Show help.
++#   -sni DOMAIN, --sni DOMAIN   Set both Xray and Hysteria SNI.
++#   -xsni DOMAIN, --xsni DOMAIN Override Xray SNI only.
++#   -hsni DOMAIN, --hsni DOMAIN Override Hysteria SNI only.
++#   -s, --keep-secrets          Preserve server-level REALITY/TLS secrets.
++#   -h, --help                  Show help.
+ #
+ # Environment variables:
+ #   PORT=443
+@@ -19,6 +22,12 @@
+ #   SSH_HARDEN=0
+ #   SSH_PUBKEY="ssh-ed25519 ..."
+ #   SNI=example.com
++#   XSNI=www.microsoft.com
++#   HSNI=www.apple.com
++#   PROXY_MANAGER_SOURCE=/path/to/proxy-manager
++#   PROXY_MANAGER_BIN=/path/to/prebuilt/proxy-manager
++#   PM_ADMIN_USERNAME=admin
++#   PM_ADMIN_PASSWORD=...   # optional; otherwise prompted on first install
+ #
+ # Logs:
+ #   /var/log/proxy-setup/proxy-setup-YYYYMMDD-HHMMSS.log
+@@ -37,9 +46,15 @@
+ SSH_HARDEN="${SSH_HARDEN:-1}"
+ SSH_PUBKEY="${SSH_PUBKEY:-}"
+ SNI="${SNI:-}"
++XSNI="${XSNI:-}"
++HSNI="${HSNI:-}"
+ SNI_EXPLICIT=0
++XSNI_EXPLICIT=0
++HSNI_EXPLICIT=0
+ KEEP_SECRETS=0
+ [[ -n "$SNI" ]] && SNI_EXPLICIT=1
++[[ -n "$XSNI" ]] && XSNI_EXPLICIT=1
++[[ -n "$HSNI" ]] && HSNI_EXPLICIT=1
+ 
+ NEW_USER="proxy"
+ DONOR_PORT=443
+@@ -49,6 +64,27 @@
+ BACKUP_ROOT="/var/backups/proxy-setup"
+ LOG_ROOT="/var/log/proxy-setup"
+ 
++PM_USER="proxy-manager"
++PM_GROUP="proxy-manager"
++PM_ETC="/etc/proxy-manager"
++PM_STATE="/var/lib/proxy-manager"
++PM_LOG="/var/log/proxy-manager"
++PM_DB="$PM_STATE/proxy-manager.db"
++PM_BIN="/usr/local/bin/proxy-manager"
++PM_CONFIG="$PM_ETC/config.yaml"
++PM_ADMIN_USERNAME="${PM_ADMIN_USERNAME:-admin}"
++PM_ADMIN_PASSWORD="${PM_ADMIN_PASSWORD:-}"
++SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
++DEFAULT_PM_SOURCE="$(cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd || true)"
++PROXY_MANAGER_SOURCE="${PROXY_MANAGER_SOURCE:-$DEFAULT_PM_SOURCE}"
++PROXY_MANAGER_BIN="${PROXY_MANAGER_BIN:-}"
++LEGACY_PRESENT=0
++INITIAL_ACCOUNT=""
++XRAY_SNI=""
++HY_SNI=""
++OLD_XRAY_SNI=""
++OLD_HY_SNI=""
++
+ FALLBACK_SNI=(
+   www.microsoft.com
+   dl.google.com
+@@ -63,13 +99,18 @@
+ 
+ Options:
+   -sni DOMAIN, --sni DOMAIN
+-      Use DOMAIN as the REALITY SNI/target and skip automatic SNI discovery.
++      Set both Xray REALITY SNI/target and Hysteria SNI/masquerade.
++
++  -xsni DOMAIN, --xsni DOMAIN
++      Override Xray REALITY SNI/target only.
++
++  -hsni DOMAIN, --hsni DOMAIN
++      Override Hysteria SNI/masquerade only.
+ 
+   -s, --keep-secrets
+-      Reuse existing VPN credentials instead of rotating them.
+-      Preserves VLESS UUID, REALITY private/public key, short ID,
+-      Hysteria password, Hysteria certificate/key, certificate pin,
+-      and the old SNI unless --sni is supplied.
++      Preserve server-level secrets on rerun: REALITY private/public key,
++      short ID and Hysteria certificate/key. Existing Proxy Manager users and
++      its SQLite database are always preserved.
+ 
+   -h, --help
+       Show this help.
+@@ -80,48 +121,32 @@
+   SSH_HARDEN=0
+   SSH_PUBKEY="ssh-ed25519 ..."
+   SNI=example.com
++  XSNI=www.microsoft.com
++  HSNI=www.apple.com
++  PROXY_MANAGER_SOURCE=/path/to/proxy-manager
++  PROXY_MANAGER_BIN=/path/to/prebuilt/proxy-manager
++  PM_ADMIN_USERNAME=admin
++  PM_ADMIN_PASSWORD=...  # optional; prompted on first Proxy Manager install
+ USAGE
+ }
+-
+ while (( $# > 0 )); do
+   case "$1" in
+     -sni|--sni)
+-      [[ $# -ge 2 ]] || {
+-        echo "Error: $1 requires a domain." >&2
+-        exit 2
+-      }
+-
+-      SNI="$2"
+-      SNI_EXPLICIT=1
+-      shift 2
+-      ;;
+-
+-    --sni=*)
+-      SNI="${1#*=}"
+-      SNI_EXPLICIT=1
+-      shift
+-      ;;
+-
+-    -s|--keep-secrets)
+-      KEEP_SECRETS=1
+-      shift
+-      ;;
+-
+-    -h|--help)
+-      usage
+-      exit 0
+-      ;;
+-
+-    --)
+-      shift
+-      break
+-      ;;
+-
+-    *)
+-      echo "Unknown option: $1" >&2
+-      echo "Run with --help for usage." >&2
+-      exit 2
+-      ;;
++      [[ $# -ge 2 ]] || { echo "Error: $1 requires a domain." >&2; exit 2; }
++      SNI="$2"; SNI_EXPLICIT=1; shift 2 ;;
++    --sni=*) SNI="${1#*=}"; SNI_EXPLICIT=1; shift ;;
++    -xsni|--xsni)
++      [[ $# -ge 2 ]] || { echo "Error: $1 requires a domain." >&2; exit 2; }
++      XSNI="$2"; XSNI_EXPLICIT=1; shift 2 ;;
++    --xsni=*) XSNI="${1#*=}"; XSNI_EXPLICIT=1; shift ;;
++    -hsni|--hsni)
++      [[ $# -ge 2 ]] || { echo "Error: $1 requires a domain." >&2; exit 2; }
++      HSNI="$2"; HSNI_EXPLICIT=1; shift 2 ;;
++    --hsni=*) HSNI="${1#*=}"; HSNI_EXPLICIT=1; shift ;;
++    -s|--keep-secrets) KEEP_SECRETS=1; shift ;;
++    -h|--help) usage; exit 0 ;;
++    --) shift; break ;;
++    *) echo "Unknown option: $1" >&2; echo "Run with --help for usage." >&2; exit 2 ;;
+   esac
+ done
+ 
+@@ -281,10 +306,15 @@
+ (( PORT >= 1 && PORT <= 65535 )) \
+   || die "PORT must be between 1 and 65535."
+ 
+-if (( SNI_EXPLICIT == 1 )); then
+-  [[ "$SNI" =~ ^[A-Za-z0-9.-]+$ && "$SNI" == *.* ]] \
+-    || die "Invalid SNI hostname: $SNI"
+-fi
++validate_hostname() {
++  local label="$1" value="$2"
++  [[ "$value" =~ ^[A-Za-z0-9.-]+$ && "$value" == *.* ]] \
++    || die "Invalid $label hostname: $value"
++}
++
++(( SNI_EXPLICIT == 0 )) || validate_hostname "SNI" "$SNI"
++(( XSNI_EXPLICIT == 0 )) || validate_hostname "Xray SNI" "$XSNI"
++(( HSNI_EXPLICIT == 0 )) || validate_hostname "Hysteria SNI" "$HSNI"
+ 
+ install_deps() {
+   section "Installing dependencies"
+@@ -305,6 +335,7 @@
+     openssh-client \
+     openssh-server \
+     sudo \
++    sqlite3 \
+     2>&1 | tee -a "$LOG_FILE"
+ 
+   log "Dependencies installed."
+@@ -425,12 +456,11 @@
+ }
+ 
+ stop_services() {
+-  section "Stopping VPN services"
+-
++  section "Stopping VPN/control services"
++  systemctl stop proxy-manager 2>>"$LOG_FILE" || true
+   systemctl stop xray 2>>"$LOG_FILE" || true
+   systemctl stop hysteria-server 2>>"$LOG_FILE" || true
+-
+-  log "VPN services stopped."
++  log "Services stopped."
+ }
+ 
+ check_ports() {
+@@ -697,60 +727,31 @@
+ 
+ backup_existing() {
+   section "Backing up existing configuration"
+-
+-  local ts
+-  local backup_dir
+-  local found=0
+-  local admin_home
+-  local auth_file
+-  local f
+-
++  local ts backup_dir found=0 admin_home auth_file f
+   ts=$(date +%Y%m%d-%H%M%S)
+   backup_dir="$BACKUP_ROOT/$ts"
+-
+-  admin_home=$(
+-    getent passwd "$NEW_USER" 2>/dev/null \
+-      | cut -d: -f6 \
+-      || true
+-  )
+-
++  admin_home=$(getent passwd "$NEW_USER" 2>/dev/null | cut -d: -f6 || true)
+   auth_file="${admin_home:+$admin_home/.ssh/authorized_keys}"
+-
+   local files=(
+-    "$XRAY_CONF"
+-    "$HY_CONF"
+-    "$HY_DIR/server.key"
+-    "$HY_DIR/server.crt"
+-    "/root/proxy-links.txt"
+-    "/home/$NEW_USER/proxy-links.txt"
++    "$XRAY_CONF" "$HY_CONF" "$HY_DIR/server.key" "$HY_DIR/server.crt"
++    "$PM_CONFIG" "$PM_DB" "$PM_DB-wal" "$PM_DB-shm"
++    "/etc/systemd/system/proxy-manager.service"
++    "/root/proxy-links.txt" "/home/$NEW_USER/proxy-links.txt"
+     "/etc/ssh/sshd_config"
+     "/etc/ssh/sshd_config.d/00-proxy-setup-hardening.conf"
+     "/etc/ssh/sshd_config.d/99-proxy-setup-hardening.conf"
+   )
+-
+   [[ -n "$auth_file" ]] && files+=("$auth_file")
+-
+   for f in "${files[@]}"; do
+     [[ -e "$f" ]] || continue
+-
+     if (( found == 0 )); then
+-      mkdir -p "$backup_dir"
+-      chmod 700 "$BACKUP_ROOT" "$backup_dir"
+-      found=1
++      mkdir -p "$backup_dir"; chmod 700 "$BACKUP_ROOT" "$backup_dir"; found=1
+     fi
+-
+     mkdir -p "$backup_dir$(dirname "$f")"
+-
+     cp -a -- "$f" "$backup_dir$f"
+-
+     log_raw "[$(date -Is)] [BACKUP] $f -> $backup_dir$f"
+   done
+-
+-  if (( found == 1 )); then
+-    log "Previous configuration backed up to: $backup_dir"
+-  else
+-    log "No existing configuration found."
+-  fi
++  if (( found == 1 )); then log "Previous configuration backed up to: $backup_dir"; else log "No existing configuration found."; fi
+ }
+ 
+ prompt_user_password() {
+@@ -1006,180 +1007,279 @@
+   SSH_PUBKEY=""
+ }
+ 
+-load_existing_secrets() {
+-  section "Loading existing VPN credentials"
+-
+-  [[ -f "$XRAY_CONF" ]] \
+-    || die "Cannot use -s: existing Xray config was not found: $XRAY_CONF"
+-
+-  [[ -f "$HY_CONF" ]] \
+-    || die "Cannot use -s: existing Hysteria config was not found: $HY_CONF"
+-
+-  [[ -f "$HY_DIR/server.crt" ]] \
+-    || die "Cannot use -s: existing Hysteria certificate was not found."
+-
+-  [[ -f "$HY_DIR/server.key" ]] \
+-    || die "Cannot use -s: existing Hysteria private key was not found."
+-
+-  UUID=$(
+-    jq -r \
+-      '[.inbounds[] | select(.protocol == "vless") | .settings.clients[]?.id][0] // empty' \
+-      "$XRAY_CONF"
+-  )
+-
+-  PRIV=$(
+-    jq -r \
+-      '[.inbounds[] | select(.protocol == "vless" and .streamSettings.security == "reality") | .streamSettings.realitySettings.privateKey][0] // empty' \
+-      "$XRAY_CONF"
+-  )
+-
+-  SHORT_ID=$(
+-    jq -r \
+-      '[.inbounds[] | select(.protocol == "vless" and .streamSettings.security == "reality") | .streamSettings.realitySettings.shortIds[0]][0] // empty' \
+-      "$XRAY_CONF"
+-  )
+ 
+-  local old_sni
+-  local kp
+-
+-  old_sni=$(
+-    jq -r \
+-      '[.inbounds[] | select(.protocol == "vless" and .streamSettings.security == "reality") | .streamSettings.realitySettings.serverNames[0]][0] // empty' \
+-      "$XRAY_CONF"
+-  )
+-
+-  HY_PASS=$(
+-    awk '
+-      /^[[:space:]]*password:[[:space:]]*/ {
+-        sub(/^[[:space:]]*password:[[:space:]]*/, "")
+-        print
+-        exit
+-      }
+-    ' "$HY_CONF"
+-  )
+-
+-  [[ -n "$UUID" ]] \
+-    || die "Cannot use -s: could not read the existing VLESS UUID."
++detect_legacy_installation() {
++  LEGACY_PRESENT=0
++  if [[ -s "$PM_DB" ]]; then
++    local existing_users
++    existing_users=$(sqlite3 "$PM_DB" 'SELECT COUNT(*) FROM users;' 2>/dev/null || echo 0)
++    (( existing_users > 0 )) && return 0
++  fi
++  if [[ -f "$XRAY_CONF" ]]; then
++    local count
++    count=$(jq -r '[.inbounds[]? | select(.protocol == "vless") | .settings.clients[]? | .id] | length' "$XRAY_CONF" 2>/dev/null || echo 0)
++    (( count > 0 )) && LEGACY_PRESENT=1
++  fi
++  if [[ -f "$HY_CONF" ]] && grep -Eq '^[[:space:]]*type:[[:space:]]*password[[:space:]]*$' "$HY_CONF"; then
++    LEGACY_PRESENT=1
++  fi
++  if (( LEGACY_PRESENT == 1 && KEEP_SECRETS == 0 )); then
++    die "Legacy single-user VPN credentials were detected. Re-run with -s/--keep-secrets so REALITY/TLS server secrets stay unchanged during migration."
++  fi
++}
+ 
+-  [[ -n "$PRIV" ]] \
+-    || die "Cannot use -s: could not read the existing REALITY private key."
++resolve_snis() {
++  section "Resolving Xray and Hysteria SNI"
++  XRAY_SNI="${XSNI:-${SNI:-${OLD_XRAY_SNI:-}}}"
++  HY_SNI="${HSNI:-${SNI:-${OLD_HY_SNI:-}}}"
++
++  if [[ -z "$XRAY_SNI" || -z "$HY_SNI" ]]; then
++    pick_sni
++    [[ -n "$XRAY_SNI" ]] || XRAY_SNI="$SNI"
++    [[ -n "$HY_SNI" ]] || HY_SNI="$SNI"
++  fi
+ 
+-  [[ -n "$SHORT_ID" ]] \
+-    || die "Cannot use -s: could not read the existing REALITY short ID."
++  validate_hostname "Xray SNI" "$XRAY_SNI"
++  validate_hostname "Hysteria SNI" "$HY_SNI"
+ 
+-  [[ -n "$HY_PASS" ]] \
+-    || die "Cannot use -s: could not read the existing Hysteria password."
++  if (( XSNI_EXPLICIT == 1 )); then
++    check_tls "$XRAY_SNI" "$XRAY_SNI" || die "Explicit Xray SNI failed TLS 1.3 + HTTP/2 validation: $XRAY_SNI"
++  fi
++  if (( HSNI_EXPLICIT == 1 )); then
++    check_tls "$HY_SNI" "$HY_SNI" || die "Explicit Hysteria SNI failed TLS 1.3 + HTTP/2 validation: $HY_SNI"
++  fi
++  log "Xray SNI: $XRAY_SNI"
++  log "Hysteria SNI: $HY_SNI"
++}
+ 
+-  if (( SNI_EXPLICIT == 0 )); then
+-    [[ -n "$old_sni" ]] \
+-      || die "Cannot use -s: could not determine the existing REALITY SNI."
++install_proxy_manager() {
++  section "Installing Proxy Manager"
++  local src_bin=""
++
++  if [[ -n "$PROXY_MANAGER_BIN" ]]; then
++    [[ -x "$PROXY_MANAGER_BIN" ]] || die "PROXY_MANAGER_BIN is not executable: $PROXY_MANAGER_BIN"
++    src_bin="$PROXY_MANAGER_BIN"
++  elif [[ -f "$PROXY_MANAGER_SOURCE/go.mod" && -f "$PROXY_MANAGER_SOURCE/Makefile" ]]; then
++    export DEBIAN_FRONTEND=noninteractive
++    apt-get install -y golang-go nodejs npm make gcc libc6-dev libsqlite3-dev >>"$LOG_FILE" 2>&1
++    (cd "$PROXY_MANAGER_SOURCE" && make build) >>"$LOG_FILE" 2>&1 \
++      || die "Proxy Manager source build failed. Provide PROXY_MANAGER_BIN=/path/to/prebuilt/binary if this VPS lacks a compatible Node/Go toolchain."
++    src_bin="$PROXY_MANAGER_SOURCE/bin/proxy-manager"
++  elif [[ -x "$PM_BIN" ]]; then
++    src_bin="$PM_BIN"
++    log "Reusing already installed Proxy Manager binary."
++  else
++    die "Proxy Manager binary/source not found. Run this script from the proxy-manager project or set PROXY_MANAGER_BIN/PROXY_MANAGER_SOURCE."
++  fi
+ 
+-    SNI="$old_sni"
++  getent group "$PM_GROUP" >/dev/null || groupadd --system "$PM_GROUP"
++  id "$PM_USER" >/dev/null 2>&1 || useradd --system --gid "$PM_GROUP" --home-dir "$PM_STATE" --shell /usr/sbin/nologin "$PM_USER"
++  install -d -o root -g "$PM_GROUP" -m 0750 "$PM_ETC"
++  install -d -o "$PM_USER" -g "$PM_GROUP" -m 0700 "$PM_STATE" "$PM_LOG"
++  if [[ "$src_bin" != "$PM_BIN" ]]; then install -o root -g root -m 0755 "$src_bin" "$PM_BIN"; fi
++
++  cat >/etc/systemd/system/proxy-manager.service <<'EOF_PM_SERVICE'
++[Unit]
++Description=Proxy Manager
++After=network-online.target xray.service
++Wants=network-online.target
++Before=hysteria-server.service
++
++[Service]
++Type=simple
++User=proxy-manager
++Group=proxy-manager
++ExecStart=/usr/local/bin/proxy-manager --config /etc/proxy-manager/config.yaml serve
++Restart=on-failure
++RestartSec=3
++UMask=0077
++NoNewPrivileges=true
++PrivateTmp=true
++PrivateDevices=true
++ProtectSystem=strict
++ProtectHome=true
++ProtectKernelTunables=true
++ProtectKernelModules=true
++ProtectControlGroups=true
++ProtectClock=true
++RestrictSUIDSGID=true
++RestrictRealtime=true
++LockPersonality=true
++MemoryDenyWriteExecute=true
++SystemCallArchitectures=native
++ReadWritePaths=/var/lib/proxy-manager /var/log/proxy-manager
++ReadOnlyPaths=/etc/proxy-manager
++CapabilityBoundingSet=
++AmbientCapabilities=
++
++[Install]
++WantedBy=multi-user.target
++EOF_PM_SERVICE
++  chmod 644 /etc/systemd/system/proxy-manager.service
++  log "Proxy Manager binary and systemd unit installed."
++}
++
++write_proxy_manager_config() {
++  section "Writing Proxy Manager configuration"
++  local pin
++  pin=$(printf '%s' "$HY_PIN" | tr -d ':' | tr 'A-F' 'a-f')
++  cat >"$PM_CONFIG" <<EOF_PM_CONFIG
++listen: 127.0.0.1:18080
++internal_listen: 127.0.0.1:18081
++database: $PM_DB
++session_secure: false
++session_ttl: 12h
++public_ip: $PUBLIC_IP
++port: $PORT
++
++xray:
++  api_address: 127.0.0.1:10085
++  inbound_tag: vless-reality
++  sni: $XRAY_SNI
++  public_key: $PUB
++  short_id: $SHORT_ID
++  flow: xtls-rprx-vision
++
++hysteria:
++  sni: $HY_SNI
++  certificate_pin: $pin
++  insecure: true
++
++services:
++  xray: xray.service
++  hysteria: hysteria-server.service
++EOF_PM_CONFIG
++  chown root:"$PM_GROUP" "$PM_CONFIG"
++  chmod 0640 "$PM_CONFIG"
++}
++
++prompt_pm_admin_password() {
++  local p1 p2
++  if [[ -n "$PM_ADMIN_PASSWORD" ]]; then printf '%s' "$PM_ADMIN_PASSWORD"; return 0; fi
++  [[ -r /dev/tty && -w /dev/tty ]] || die "First Proxy Manager install requires PM_ADMIN_PASSWORD in non-interactive mode."
++  echo >/dev/tty; echo "Configure Proxy Manager web admin '$PM_ADMIN_USERNAME' (minimum 14 characters)." >/dev/tty
++  while true; do
++    printf 'Proxy Manager password: ' >/dev/tty; IFS= read -r -s p1 </dev/tty || die "Could not read Proxy Manager password."; printf '\n' >/dev/tty
++    printf 'Repeat password: ' >/dev/tty; IFS= read -r -s p2 </dev/tty || die "Could not read Proxy Manager password."; printf '\n' >/dev/tty
++    (( ${#p1} >= 14 )) || { warn "Proxy Manager password must be at least 14 characters."; continue; }
++    [[ "$p1" == "$p2" ]] || { warn "Passwords do not match."; continue; }
++    printf '%s' "$p1"; return 0
++  done
++}
+ 
+-    log "Existing REALITY SNI preserved: $SNI"
++initialize_proxy_manager() {
++  section "Initializing Proxy Manager database"
++  local need_admin=0 admin_password password_file
++  if [[ ! -s "$PM_DB" ]]; then need_admin=1; fi
++  if (( need_admin == 1 )); then
++    admin_password=$(prompt_pm_admin_password)
++    password_file=$(mktemp "$PM_STATE/.admin-password.XXXXXX")
++    chown "$PM_USER:$PM_GROUP" "$password_file"; chmod 0600 "$password_file"
++    printf '%s' "$admin_password" >"$password_file"; admin_password=""
++    sudo -u "$PM_USER" "$PM_BIN" --config "$PM_CONFIG" init-admin --username "$PM_ADMIN_USERNAME" --password-file "$password_file" >>"$LOG_FILE" 2>&1
++    rm -f "$password_file"
++    log "Proxy Manager admin initialized."
+   else
+-    log "Existing credentials preserved, but SNI will be changed to: $SNI"
++    log "Existing Proxy Manager database preserved."
+   fi
++  chown "$PM_USER:$PM_GROUP" "$PM_DB"* 2>/dev/null || true
++  chmod 0600 "$PM_DB"* 2>/dev/null || true
++}
+ 
+-  kp=$(
+-    xray x25519 -i "$PRIV" 2>&1
+-  ) || die "Could not derive REALITY public key from existing private key."
+-
+-  PUB=$(
+-    grep -iE '^(public|password)' <<<"$kp" \
+-      | awk '{print $NF}' \
+-      | head -n1
+-  )
++migrate_legacy_if_needed() {
++  (( LEGACY_PRESENT == 1 )) || return 0
++  section "Migrating legacy single-user credentials"
++  local count
++  count=$(sqlite3 "$PM_DB" 'SELECT COUNT(*) FROM users;' 2>/dev/null || echo 0)
++  if (( count > 0 )); then
++    log "Proxy Manager already contains users; legacy import skipped."
++    return 0
++  fi
++  sudo -u "$PM_USER" "$PM_BIN" --config "$PM_CONFIG" migrate-legacy \
++    --xray-config "$XRAY_CONF" --hysteria-config "$HY_CONF" >>"$LOG_FILE" 2>&1 \
++    || die "Legacy migration failed; original daemon configurations have not been replaced."
++  INITIAL_ACCOUNT="legacy"
++  log "Legacy account imported. Original UUID/password are retained in SQLite."
++}
+ 
+-  [[ -n "$PUB" ]] \
+-    || die "Could not parse the REALITY public key."
++ensure_initial_account() {
++  local count
++  count=$(sqlite3 "$PM_DB" 'SELECT COUNT(*) FROM users;' 2>/dev/null || echo 0)
++  if (( count == 0 )); then
++    "$PM_BIN" --config "$PM_CONFIG" user add default >>"$LOG_FILE" 2>&1 \
++      || die "Could not create initial Proxy Manager account."
++    INITIAL_ACCOUNT="default"
++    log "Created initial account: default"
++  fi
++}
+ 
+-  HY_PIN=$(
+-    openssl x509 \
+-      -noout \
+-      -fingerprint \
+-      -sha256 \
+-      -in "$HY_DIR/server.crt" \
+-      | cut -d= -f2
+-  )
++load_existing_secrets() {
++  section "Loading existing server-level VPN secrets"
++  [[ -f "$XRAY_CONF" ]] || die "Cannot use -s: existing Xray config was not found: $XRAY_CONF"
++  [[ -f "$HY_CONF" ]] || die "Cannot use -s: existing Hysteria config was not found: $HY_CONF"
++  [[ -f "$HY_DIR/server.crt" ]] || die "Cannot use -s: existing Hysteria certificate was not found."
++  [[ -f "$HY_DIR/server.key" ]] || die "Cannot use -s: existing Hysteria private key was not found."
++
++  PRIV=$(jq -r '[.inbounds[] | select(.protocol == "vless" and .streamSettings.security == "reality") | .streamSettings.realitySettings.privateKey][0] // empty' "$XRAY_CONF")
++  SHORT_ID=$(jq -r '[.inbounds[] | select(.protocol == "vless" and .streamSettings.security == "reality") | .streamSettings.realitySettings.shortIds[0]][0] // empty' "$XRAY_CONF")
++  OLD_XRAY_SNI=$(jq -r '[.inbounds[] | select(.protocol == "vless" and .streamSettings.security == "reality") | .streamSettings.realitySettings.serverNames[0]][0] // empty' "$XRAY_CONF")
++
++  [[ -n "$PRIV" ]] || die "Cannot use -s: could not read existing REALITY private key."
++  [[ -n "$SHORT_ID" ]] || die "Cannot use -s: could not read existing REALITY short ID."
++  [[ -n "$OLD_XRAY_SNI" ]] || die "Cannot use -s: could not read existing Xray SNI."
+ 
+-  [[ -n "$HY_PIN" ]] \
+-    || die "Could not calculate the existing Hysteria certificate fingerprint."
++  local kp
++  kp=$(xray x25519 -i "$PRIV" 2>&1) || die "Could not derive REALITY public key."
++  PUB=$(grep -iE '^(public|password)' <<<"$kp" | awk '{print $NF}' | head -n1)
++  [[ -n "$PUB" ]] || die "Could not parse REALITY public key."
++
++  OLD_HY_SNI=$(awk '
++    /^[[:space:]]*url:[[:space:]]*https:\/\// {
++      s=$0; sub(/^[[:space:]]*url:[[:space:]]*https:\/\//,"",s); sub(/[\/#].*$/,"",s); print s; exit
++    }
++  ' "$HY_CONF")
++  if [[ -z "$OLD_HY_SNI" ]]; then
++    OLD_HY_SNI=$(openssl x509 -in "$HY_DIR/server.crt" -noout -subject -nameopt RFC2253 2>/dev/null | sed -n 's/^subject=CN=//p' | head -n1)
++  fi
++  [[ -n "$OLD_HY_SNI" ]] || OLD_HY_SNI="$OLD_XRAY_SNI"
+ 
+-  log "Existing VPN credentials loaded successfully."
++  HY_PIN=$(openssl x509 -noout -fingerprint -sha256 -in "$HY_DIR/server.crt" | cut -d= -f2)
++  [[ -n "$HY_PIN" ]] || die "Could not calculate Hysteria certificate fingerprint."
+ 
+-  log_raw "[$(date -Is)] [INFO] Credential mode: preserve"
+-  log_raw "[$(date -Is)] [INFO] Existing VLESS UUID loaded: yes"
+-  log_raw "[$(date -Is)] [INFO] Existing REALITY key pair loaded: yes"
+-  log_raw "[$(date -Is)] [INFO] Existing REALITY short ID loaded: yes"
+-  log_raw "[$(date -Is)] [INFO] Existing Hysteria password loaded: yes"
+-  log_raw "[$(date -Is)] [INFO] Existing Hysteria certificate loaded: yes"
++  log "Existing REALITY key/short ID and Hysteria certificate/key loaded."
++  log_raw "[$(date -Is)] [INFO] Server secret mode: preserve"
+ }
+ 
+ gen_secrets() {
+-  section "Generating VPN credentials"
+-
+-  UUID=$(
+-    cat /proc/sys/kernel/random/uuid
+-  )
+-
+-  SHORT_ID=$(
+-    openssl rand -hex 8
+-  )
+-
+-  HY_PASS=$(
+-    openssl rand -hex 16
+-  )
+-
++  section "Generating server-level VPN secrets"
++  SHORT_ID=$(openssl rand -hex 8)
+   local kp
+-
+-  kp=$(
+-    xray x25519 2>&1
+-  )
+-
+-  PRIV=$(
+-    grep -iE '^private' <<<"$kp" \
+-      | awk '{print $NF}'
+-  )
+-
+-  PUB=$(
+-    grep -iE '^(public|password)' <<<"$kp" \
+-      | awk '{print $NF}'
+-  )
+-
+-  [[ -n "$PRIV" && -n "$PUB" ]] \
+-    || die "Could not parse xray x25519 output."
+-
+-  log "VPN credentials generated."
+-
+-  log_raw "[$(date -Is)] [INFO] UUID generated: yes"
+-  log_raw "[$(date -Is)] [INFO] REALITY private key generated: yes"
+-  log_raw "[$(date -Is)] [INFO] REALITY public key generated: yes"
+-  log_raw "[$(date -Is)] [INFO] Hysteria password generated: yes"
++  kp=$(xray x25519 2>&1)
++  PRIV=$(grep -iE '^private' <<<"$kp" | awk '{print $NF}')
++  PUB=$(grep -iE '^(public|password)' <<<"$kp" | awk '{print $NF}')
++  [[ -n "$PRIV" && -n "$PUB" ]] || die "Could not parse xray x25519 output."
++  log "REALITY server credentials generated. User credentials will be generated by Proxy Manager."
+ }
+ 
+ write_xray() {
+   section "Writing Xray configuration"
+-
+   mkdir -p "$(dirname "$XRAY_CONF")"
+-
+   cat >"$XRAY_CONF" <<EOF_XRAY
+ {
+-  "log": {
+-    "loglevel": "warning"
++  "log": { "loglevel": "warning" },
++  "api": {
++    "tag": "api",
++    "listen": "127.0.0.1:10085",
++    "services": ["HandlerService", "StatsService"]
+   },
+   "inbounds": [
+     {
++      "tag": "vless-reality",
+       "listen": "0.0.0.0",
+       "port": $PORT,
+       "protocol": "vless",
+       "settings": {
+-        "clients": [
+-          {
+-            "id": "$UUID",
+-            "flow": "xtls-rprx-vision"
+-          }
+-        ],
++        "clients": [],
+         "decryption": "none"
+       },
+       "streamSettings": {
+@@ -1187,94 +1287,39 @@
+         "security": "reality",
+         "realitySettings": {
+           "show": false,
+-          "dest": "$SNI:$DONOR_PORT",
++          "dest": "$XRAY_SNI:$DONOR_PORT",
+           "xver": 0,
+-          "serverNames": [
+-            "$SNI"
+-          ],
++          "serverNames": ["$XRAY_SNI"],
+           "privateKey": "$PRIV",
+-          "shortIds": [
+-            "$SHORT_ID"
+-          ]
++          "shortIds": ["$SHORT_ID"]
+         }
+       },
+-      "sniffing": {
+-        "enabled": true,
+-        "destOverride": [
+-          "http",
+-          "tls",
+-          "quic"
+-        ]
+-      }
++      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
+     }
+   ],
+   "outbounds": [
+-    {
+-      "protocol": "freedom",
+-      "tag": "direct"
+-    },
+-    {
+-      "protocol": "blackhole",
+-      "tag": "block"
+-    }
++    { "protocol": "freedom", "tag": "direct" },
++    { "protocol": "blackhole", "tag": "block" }
+   ]
+ }
+ EOF_XRAY
+-
+-  if getent group xray >/dev/null 2>&1; then
+-    chown root:xray "$XRAY_CONF"
+-    chmod 640 "$XRAY_CONF"
+-
+-    log "Xray config permissions set to root:xray 0640."
+-  else
+-    chown root:root "$XRAY_CONF"
+-    chmod 600 "$XRAY_CONF"
+-
+-    warn "The xray group was not found. Xray config set to root:root 0600."
+-  fi
+-
+-  xray run \
+-    -test \
+-    -config "$XRAY_CONF" \
+-    >>"$LOG_FILE" 2>&1 \
+-    || die "Xray rejected the configuration."
+-
+-  log "Xray configuration validated successfully."
++  if getent group xray >/dev/null 2>&1; then chown root:xray "$XRAY_CONF"; chmod 640 "$XRAY_CONF"; else chown root:root "$XRAY_CONF"; chmod 600 "$XRAY_CONF"; fi
++  xray run -test -config "$XRAY_CONF" >>"$LOG_FILE" 2>&1 || die "Xray rejected the configuration."
++  log "Xray configuration validated; API is loopback-only on 127.0.0.1:10085."
+ }
+ 
+ write_hysteria() {
+   section "Writing Hysteria configuration"
+-
+   mkdir -p "$HY_DIR"
+-
+   if (( KEEP_SECRETS == 0 )); then
+     log "Generating a new Hysteria TLS certificate."
+-
+-    openssl req \
+-      -x509 \
+-      -nodes \
+-      -newkey ec \
+-      -pkeyopt ec_paramgen_curve:prime256v1 \
+-      -keyout "$HY_DIR/server.key" \
+-      -out "$HY_DIR/server.crt" \
+-      -subj "/CN=$SNI" \
+-      -days 3650 \
+-      >>"$LOG_FILE" 2>&1
++    openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
++      -keyout "$HY_DIR/server.key" -out "$HY_DIR/server.crt" -subj "/CN=$HY_SNI" -days 3650 >>"$LOG_FILE" 2>&1
+   else
+     log "Keeping the existing Hysteria TLS certificate and private key."
+   fi
+-
+-  HY_PIN=$(
+-    openssl x509 \
+-      -noout \
+-      -fingerprint \
+-      -sha256 \
+-      -in "$HY_DIR/server.crt" \
+-      | cut -d= -f2
+-  )
+-
+-  [[ -n "$HY_PIN" ]] \
+-    || die "Could not calculate Hysteria certificate fingerprint."
++  HY_PIN=$(openssl x509 -noout -fingerprint -sha256 -in "$HY_DIR/server.crt" | cut -d= -f2)
++  [[ -n "$HY_PIN" ]] || die "Could not calculate Hysteria certificate fingerprint."
+ 
+   cat >"$HY_CONF" <<EOF_HY
+ listen: :$PORT
+@@ -1284,76 +1329,49 @@
+   key: $HY_DIR/server.key
+ 
+ auth:
+-  type: password
+-  password: $HY_PASS
++  type: http
++  http:
++    url: http://127.0.0.1:18081/internal/hysteria/auth
++    insecure: false
+ 
+ masquerade:
+   type: proxy
+   proxy:
+-    url: https://$SNI
++    url: https://$HY_SNI
+     rewriteHost: true
+ EOF_HY
+-
+-  if id hysteria >/dev/null 2>&1; then
+-    chown -R hysteria:hysteria "$HY_DIR"
+-
+-    log "Hysteria files assigned to hysteria:hysteria."
+-  fi
+-
++  if id hysteria >/dev/null 2>&1; then chown -R hysteria:hysteria "$HY_DIR"; fi
+   chmod 600 "$HY_DIR/server.key"
+-
+-  log "Hysteria configuration written."
++  log "Hysteria configured to authenticate through Proxy Manager on loopback."
+ }
+ 
+ start_services() {
+-  section "Starting VPN services"
+-
+-  systemctl daemon-reload \
+-    >>"$LOG_FILE" 2>&1
++  section "Starting Proxy Manager and VPN services"
++  systemctl daemon-reload >>"$LOG_FILE" 2>&1
++  systemctl enable xray hysteria-server proxy-manager >>"$LOG_FILE" 2>&1
++
++  systemctl restart xray >>"$LOG_FILE" 2>&1
++  sleep 1
++  systemctl restart proxy-manager >>"$LOG_FILE" 2>&1
++  sleep 1
+ 
+-  systemctl enable \
+-    xray \
+-    hysteria-server \
+-    >>"$LOG_FILE" 2>&1
+-
+-  systemctl restart xray \
+-    >>"$LOG_FILE" 2>&1
++  curl -fsS http://127.0.0.1:18081/internal/health >/dev/null \
++    || die "Proxy Manager internal health endpoint is unavailable."
+ 
+-  systemctl restart hysteria-server \
+-    >>"$LOG_FILE" 2>&1
++  "$PM_BIN" --config "$PM_CONFIG" reconcile >>"$LOG_FILE" 2>&1 \
++    || die "Initial Xray reconciliation failed."
+ 
++  systemctl restart hysteria-server >>"$LOG_FILE" 2>&1
+   sleep 2
+ 
+   local s
+-
+-  for s in \
+-    xray \
+-    hysteria-server
+-  do
++  for s in proxy-manager xray hysteria-server; do
+     if ! systemctl is-active --quiet "$s"; then
+-      journalctl \
+-        -u "$s" \
+-        -n 100 \
+-        --no-pager \
+-        >>"$LOG_FILE" 2>&1 \
+-        || true
+-
++      journalctl -u "$s" -n 100 --no-pager >>"$LOG_FILE" 2>&1 || true
+       die "Service $s failed to start."
+     fi
+-
+     log "Service $s is active."
+   done
+-
+-  {
+-    echo
+-    echo "--- Xray status ---"
+-    systemctl status xray --no-pager -l 2>&1 || true
+-
+-    echo
+-    echo "--- Hysteria status ---"
+-    systemctl status hysteria-server --no-pager -l 2>&1 || true
+-
+-  } >>"$LOG_FILE"
+ }
+ 
+ tune_net() {
+@@ -1437,204 +1455,136 @@
+ }
+ 
+ print_links() {
+-  section "Generating client links"
+-
+-  local host
+-  local vless
+-  local hy2
+-  local user_home
+-  local links_file
+-
+-  host=$(
+-    hostname -s 2>/dev/null \
+-      | tr -c 'A-Za-z0-9-' '-' \
+-      | sed 's/^-*//; s/-*$//'
+-  )
+-
+-  [[ -n "$host" ]] || host="vps"
+-
+-  HY_PIN=$(
+-    printf '%s' "$HY_PIN" \
+-      | tr -d ':' \
+-      | tr 'A-F' 'a-f'
+-  )
+-
+-  vless="vless://${UUID}@${PUBLIC_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUB}&sid=${SHORT_ID}&type=tcp&headerType=none#Reality-${host}"
+-
+-  hy2="hysteria2://${HY_PASS}@${PUBLIC_IP}:${PORT}/?sni=${SNI}&insecure=1&pinSHA256=${HY_PIN}#Hy2-${host}"
+-
+-  user_home=$(
+-    getent passwd "$NEW_USER" \
+-      | cut -d: -f6
+-  )
+-
+-  [[ -n "$user_home" && -d "$user_home" ]] \
+-    || die "Could not determine home directory for $NEW_USER."
+-
++  section "Proxy Manager access and initial links"
++  local user_home links_file
++  user_home=$(getent passwd "$NEW_USER" | cut -d: -f6)
++  [[ -n "$user_home" && -d "$user_home" ]] || die "Could not determine home directory for $NEW_USER."
+   links_file="$user_home/proxy-links.txt"
+ 
+-  umask 077
+-
+-  {
+-    echo "# Reality SNI target: $SNI"
+-    echo "# Generated: $(date -Is)"
+-
+-    echo
+-
+-    echo "$vless"
+-
+-    echo
+-
+-    echo "$hy2"
+-
+-  } >"$links_file"
+-
+-  chown \
+-    "$NEW_USER:$(id -gn "$NEW_USER")" \
+-    "$links_file"
+-
+-  chmod 600 "$links_file"
+-
+-  echo >&2
+-  echo "==========================================================" >&2
+-  echo " Reality SNI target: $SNI" >&2
+-  echo "==========================================================" >&2
+-
+-  echo >&2
+-
+-  echo "VLESS + Reality (TCP/$PORT):" >&2
+-  printf '%s\n' "$vless" >&2
++  if [[ -n "$INITIAL_ACCOUNT" ]]; then
++    umask 077
++    "$PM_BIN" --config "$PM_CONFIG" links "$INITIAL_ACCOUNT" >"$links_file"
++    chown "$NEW_USER:$(id -gn "$NEW_USER")" "$links_file"
++    chmod 600 "$links_file"
++    echo >&2
++    echo "Initial account: $INITIAL_ACCOUNT" >&2
++    cat "$links_file" >&2
++    echo >&2
++    echo "Links saved to: $links_file" >&2
++  else
++    log "Existing Proxy Manager database preserved; no user credentials were regenerated."
++  fi
+ 
+   echo >&2
+-
+-  echo "Hysteria 2 (UDP/$PORT):" >&2
+-  printf '%s\n' "$hy2" >&2
+-
++  echo "Proxy Manager is bound to localhost only." >&2
++  echo "Open it through SSH forwarding:" >&2
++  echo "  ssh -L 8080:127.0.0.1:18080 $NEW_USER@$PUBLIC_IP" >&2
++  echo "Then open: http://127.0.0.1:8080" >&2
+   echo >&2
+-
+-  echo "Links saved to: $links_file" >&2
+-  echo "Full setup log: $LOG_FILE" >&2
+-
+-  log_raw "[$(date -Is)] [INFO] Client links generated."
+-  log_raw "[$(date -Is)] [INFO] Client links file: $links_file"
++  echo "CLI users:" >&2
++  "$PM_BIN" --config "$PM_CONFIG" user list >&2 || true
++  log_raw "[$(date -Is)] [INFO] Proxy Manager access instructions printed."
+ }
+ 
+ final_diagnostics() {
+   section "Final system diagnostics"
+-
+   {
+-    echo
+-    echo "===== FINAL STATE ====="
+-
++    echo; echo "===== FINAL STATE ====="
+     echo "Timestamp: $(date -Is)"
+-    echo "Public IP: $PUBLIC_IP"
+-    echo "Port: $PORT"
+-    echo "SNI: $SNI"
+-    echo "Keep secrets: $KEEP_SECRETS"
+-
+-    echo
+-    echo "--- users ---"
+-    id "$NEW_USER" 2>&1 || true
+-
+-    echo
+-    echo "--- listening ports ---"
+-    ss -lntup 2>&1 || true
+-
+-    echo
+-    echo "--- Xray active ---"
++    echo "Public IP: $PUBLIC_IP"; echo "Port: $PORT"
++    echo "Xray SNI: $XRAY_SNI"; echo "Hysteria SNI: $HY_SNI"
++    echo "Keep server secrets: $KEEP_SECRETS"
++    echo; echo "--- listening ports ---"; ss -lntup 2>&1 || true
++    echo; echo "--- service states ---"
++    systemctl is-active proxy-manager 2>&1 || true
+     systemctl is-active xray 2>&1 || true
+-
+-    echo
+-    echo "--- Hysteria active ---"
+     systemctl is-active hysteria-server 2>&1 || true
+-
+-    echo
+-    echo "--- SSH effective auth settings ---"
+-
+-    sshd -T 2>/dev/null \
+-      | grep -E \
+-        '^(port|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|permitrootlogin) ' \
+-      || true
+-
+-    echo
+-    echo "--- UFW ---"
+-    ufw status verbose 2>&1 || true
+-
++    echo; echo "--- Proxy Manager health ---"; curl -fsS http://127.0.0.1:18081/internal/health 2>&1 || true
++    echo; echo "--- Xray API reconcile ---"; "$PM_BIN" --config "$PM_CONFIG" reconcile 2>&1 || true
++    echo; echo "--- SSH effective auth settings ---"
++    sshd -T 2>/dev/null | grep -E '^(port|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|permitrootlogin) ' || true
++    echo; echo "--- UFW ---"; ufw status verbose 2>&1 || true
+     echo "===== END FINAL STATE ====="
+-
+   } >>"$LOG_FILE"
+-
+   log "Final diagnostics written to log."
+ }
+ 
+ section "proxy-setup.sh started"
+-
+ log_raw "[$(date -Is)] [INFO] Script PID: $$"
+ log_raw "[$(date -Is)] [INFO] Shell: $BASH_VERSION"
+ log_raw "[$(date -Is)] [INFO] Hostname: $(hostname 2>/dev/null || true)"
+ log_raw "[$(date -Is)] [INFO] Architecture: $(uname -m)"
+ log_raw "[$(date -Is)] [INFO] Requested VPN port: $PORT"
+-
+-if (( KEEP_SECRETS == 1 )); then
+-  log_raw "[$(date -Is)] [INFO] Credential mode: preserve existing credentials"
+-else
+-  log_raw "[$(date -Is)] [INFO] Credential mode: rotate credentials"
+-fi
+-
+-if (( SNI_EXPLICIT == 1 )); then
+-  log_raw "[$(date -Is)] [INFO] SNI mode: explicitly supplied"
+-else
+-  log_raw "[$(date -Is)] [INFO] SNI mode: automatic"
+-fi
++log_raw "[$(date -Is)] [INFO] Keep server secrets: $KEEP_SECRETS"
+ 
+ install_deps
+-
+-PUBLIC_IP=$(detect_ip) \
+-  || die "Could not detect the public IPv4 address."
+-
++PUBLIC_IP=$(detect_ip) || die "Could not detect the public IPv4 address."
+ log "Public IP: $PUBLIC_IP"
+ 
++detect_legacy_installation
+ install_xray
+ install_hysteria
+-
+ stop_services
+ check_ports
++backup_existing
+ 
+ if (( KEEP_SECRETS == 1 )); then
+   load_existing_secrets
+ fi
+ 
+-backup_existing
++resolve_snis
++
++if (( KEEP_SECRETS == 0 )); then
++  gen_secrets
++fi
+ 
+ create_admin_user
+ setup_ssh_key_auth
+ 
+-if (( KEEP_SECRETS == 1 )); then
+-  pick_sni
+-else
+-  pick_sni
+-  gen_secrets
++# We need the Hysteria certificate fingerprint in Proxy Manager config. Generate
++# or preserve the certificate before writing that config, while legacy daemon
++# configs are still intact for migration.
++if (( KEEP_SECRETS == 0 )); then
++  mkdir -p "$HY_DIR"
++  openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
++    -keyout "$HY_DIR/server.key" -out "$HY_DIR/server.crt" -subj "/CN=$HY_SNI" -days 3650 >>"$LOG_FILE" 2>&1
++  HY_PIN=$(openssl x509 -noout -fingerprint -sha256 -in "$HY_DIR/server.crt" | cut -d= -f2)
+ fi
+ 
++install_proxy_manager
++write_proxy_manager_config
++initialize_proxy_manager
++migrate_legacy_if_needed
++
++# From this point SQLite is authoritative. Static legacy users are deliberately
++# removed from Xray and Hysteria delegates auth to Proxy Manager.
+ write_xray
+-write_hysteria
++
++# write_hysteria normally creates a certificate on non--s runs; it was already
++# generated above so temporarily treat TLS material as preserved for this call.
++if (( KEEP_SECRETS == 0 )); then
++  _keep="$KEEP_SECRETS"; KEEP_SECRETS=1; write_hysteria; KEEP_SECRETS="$_keep"
++else
++  write_hysteria
++fi
+ 
+ start_services
++ensure_initial_account
++"$PM_BIN" --config "$PM_CONFIG" reconcile >>"$LOG_FILE" 2>&1 || die "Xray reconcile after initial user creation failed."
+ tune_net
+ setup_firewall
+-
+ print_links
+ final_diagnostics
+ 
+ section "Installation completed successfully"
+-
+ echo >&2
+ echo "Setup completed successfully." >&2
+ echo "Log file: $LOG_FILE" >&2
+ echo "Latest log: $LOG_ROOT/latest.log" >&2
+-echo "VPN links: /home/$NEW_USER/proxy-links.txt" >&2
+-
++echo "Proxy Manager DB: $PM_DB" >&2
+ echo >&2
+-
+ echo "Before closing the current SSH session, test a second login:" >&2
+-echo "  ssh $NEW_USER@$PUBLIC_IP" >&2
+\ No newline at end of file
++echo "  ssh $NEW_USER@$PUBLIC_IP" >&2
++echo >&2
++echo "Proxy Manager tunnel:" >&2
++echo "  ssh -L 8080:127.0.0.1:18080 $NEW_USER@$PUBLIC_IP" >&2

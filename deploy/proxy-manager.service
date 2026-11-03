@@ -1,0 +1,35 @@
+[Unit]
+Description=Proxy Manager
+After=network-online.target
+Wants=network-online.target
+Before=hysteria-server.service
+
+[Service]
+Type=simple
+User=proxy-manager
+Group=proxy-manager
+ExecStart=/usr/local/bin/proxy-manager --config /etc/proxy-manager/config.yaml serve
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/proxy-manager /var/log/proxy-manager
+ReadOnlyPaths=/etc/proxy-manager
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

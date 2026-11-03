@@ -1,0 +1,28 @@
+listen: 127.0.0.1:18080
+# Separate loopback listener so a reverse proxy cannot accidentally expose Hysteria auth.
+internal_listen: 127.0.0.1:18081
+database: /var/lib/proxy-manager/proxy-manager.db
+session_secure: false # true when the panel itself is served over HTTPS
+session_ttl: 12h
+
+# The address clients connect to. public_host is preferred; otherwise public_ip is used.
+public_host: vpn.example.com
+public_ip: 203.0.113.10
+port: 443
+
+xray:
+  api_address: 127.0.0.1:10085
+  inbound_tag: vless-reality
+  sni: www.microsoft.com
+  public_key: REPLACE_WITH_REALITY_PUBLIC_KEY
+  short_id: REPLACE_WITH_REALITY_SHORT_ID
+  flow: xtls-rprx-vision
+
+hysteria:
+  sni: www.microsoft.com
+  certificate_pin: REPLACE_WITH_SHA256_PIN_IF_USED
+  insecure: true
+
+services:
+  xray: xray.service
+  hysteria: hysteria-server.service
