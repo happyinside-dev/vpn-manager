@@ -6,6 +6,7 @@ type User struct {
 	Enabled          bool
 	VLESSUUID        string
 	HysteriaPassword string
+	TelegramID       int64
 }
 
 type ServerConfig struct {

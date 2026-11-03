@@ -18,6 +18,7 @@ import (
 	"proxy-dev/vpn-manager/internal/profile"
 	"proxy-dev/vpn-manager/internal/server"
 	"proxy-dev/vpn-manager/internal/subscription"
+	"proxy-dev/vpn-manager/internal/telegrambot"
 	"proxy-dev/vpn-manager/internal/users"
 )
 
@@ -30,9 +31,36 @@ func main() {
 		case "links":
 			printLinks(os.Args[2:])
 			return
+		case "telegram-bot":
+			runTelegramBot(os.Args[2:])
+			return
 		}
 	}
 	serve(os.Args[1:])
+}
+
+func runTelegramBot(args []string) {
+	fs := flag.NewFlagSet("telegram-bot", flag.ExitOnError)
+	var configFile string
+	fs.StringVar(&configFile, "config", "/etc/vpn-manager/telegram.json", "telegram bot config path")
+	_ = fs.Parse(args)
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	cfg, err := telegrambot.LoadConfig(configFile)
+	if err != nil {
+		log.Error("invalid telegram config", "error", err)
+		os.Exit(1)
+	}
+	bot, err := telegrambot.New(cfg, log)
+	if err != nil {
+		log.Error("telegram bot init failed", "error", err)
+		os.Exit(1)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := bot.Run(ctx); err != nil {
+		log.Error("telegram bot stopped with error", "error", err)
+		os.Exit(1)
+	}
 }
 
 func syncUsers(args []string) {

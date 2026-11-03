@@ -98,23 +98,23 @@ func (g *SingBoxGenerator) GenerateForPlatform(_ context.Context, u model.User, 
 		inbound["auto_redirect"] = true
 	}
 
-	// Remote rule-set downloads must not depend on the VPN being up. Since 1.14,
-	// sing-box supports explicit reusable HTTP clients. Detouring this client via
-	// direct avoids a startup cycle where remote rule-sets are fetched through
-	// the default proxy before REALITY/Hysteria is usable.
-	httpClients := []any{
-		map[string]any{
-			"tag":             "rules-direct",
-			"detour":          "direct",
-			"domain_resolver": "dns-bootstrap",
-		},
-	}
-
+	// Keep mobile bootstrap self-contained. Fresh sing-box installs must not
+	// need network access to download rule-sets before the tunnel is usable.
+	// Inline rule-sets cover the important Russian service domains, while
+	// Android package rules and generic .ru/.su/.рф routing cover the rest.
 	ruleSets := []any{
-		map[string]any{"type": "remote", "tag": "geoip-ru", "format": "binary", "url": "https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-ru.srs", "http_client": "rules-direct", "update_interval": "7d"},
-		map[string]any{"type": "remote", "tag": "geosite-yandex", "format": "binary", "url": "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-yandex.srs", "http_client": "rules-direct", "update_interval": "7d"},
-		map[string]any{"type": "remote", "tag": "geosite-vk", "format": "binary", "url": "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-vk.srs", "http_client": "rules-direct", "update_interval": "7d"},
-		map[string]any{"type": "remote", "tag": "geosite-category-gov-ru", "format": "binary", "url": "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-category-gov-ru.srs", "http_client": "rules-direct", "update_interval": "7d"},
+		map[string]any{
+			"type": "inline", "tag": "ru-yandex",
+			"rules": []any{map[string]any{"domain_suffix": []string{"yandex.ru", "yandex.net", "ya.ru", "yastatic.net", "yandexcloud.net", "yandex.com", "kinopoisk.ru"}}},
+		},
+		map[string]any{
+			"type": "inline", "tag": "ru-vk",
+			"rules": []any{map[string]any{"domain_suffix": []string{"vk.com", "vk.ru", "vk.me", "userapi.com", "vkuseraudio.net", "vkuserlive.net", "vk-cdn.net"}}},
+		},
+		map[string]any{
+			"type": "inline", "tag": "ru-gov",
+			"rules": []any{map[string]any{"domain_suffix": []string{"gov.ru", "gosuslugi.ru", "government.ru", "kremlin.ru", "nalog.gov.ru"}}},
+		},
 	}
 
 	routeRules := []any{
@@ -149,13 +149,12 @@ func (g *SingBoxGenerator) GenerateForPlatform(_ context.Context, u model.User, 
 
 	routeRules = append(routeRules,
 		map[string]any{"domain_suffix": []string{"ru", "su", "xn--p1ai"}, "outbound": "direct"},
-		map[string]any{"rule_set": []string{"geosite-yandex", "geosite-vk", "geosite-category-gov-ru", "geoip-ru"}, "outbound": "direct"},
+		map[string]any{"rule_set": []string{"ru-yandex", "ru-vk", "ru-gov"}, "outbound": "direct"},
 	)
 
 	cfg := map[string]any{
-		"$schema":      "https://sing-box.sagernet.org/schema.json",
-		"log":          map[string]any{"level": "warn"},
-		"http_clients": httpClients,
+		"$schema": "https://sing-box.sagernet.org/schema.json",
+		"log":     map[string]any{"level": "warn"},
 		"dns": map[string]any{
 			"servers": []any{
 				map[string]any{"type": "local", "tag": "dns-bootstrap"},
@@ -164,7 +163,7 @@ func (g *SingBoxGenerator) GenerateForPlatform(_ context.Context, u model.User, 
 			},
 			"rules": []any{
 				map[string]any{"domain_suffix": []string{"ru", "su", "xn--p1ai"}, "server": "dns-direct"},
-				map[string]any{"rule_set": []string{"geosite-yandex", "geosite-vk", "geosite-category-gov-ru"}, "server": "dns-direct"},
+				map[string]any{"rule_set": []string{"ru-yandex", "ru-vk", "ru-gov"}, "server": "dns-direct"},
 			},
 			"final":    "dns-remote",
 			"strategy": "ipv4_only",
@@ -177,7 +176,6 @@ func (g *SingBoxGenerator) GenerateForPlatform(_ context.Context, u model.User, 
 			"final":                   "proxy",
 			"auto_detect_interface":   true,
 			"default_domain_resolver": "dns-direct",
-			"default_http_client":     "rules-direct",
 		},
 		"experimental": map[string]any{
 			"cache_file": map[string]any{"enabled": true},

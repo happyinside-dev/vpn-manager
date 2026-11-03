@@ -38,3 +38,12 @@ Russian domain/IP/rule-set bypass instead of per-app package routing.
 
 Important: app package names and service infrastructure can change. The regex
 is intentionally broad, but no static list can guarantee every Russian app.
+
+v2.4.4 compatibility note:
+Xray defaults to v26.6.27 for sing-box 1.14.x REALITY compatibility. Releases v26.7.11+ are excluded from the compatibility matrix because of known sing-box/REALITY client-version and later ML-KEM compatibility problems.
+
+
+v2.4.5: use `sudo proxy-manager xray matrix` to find a locally compatible Xray release without rotating credentials.
+
+
+v2.4.6: Android/TV profiles no longer depend on remote rule-set downloads at first start. Yandex/VK/government routing rules are embedded inline; .ru/.su/.рф and Android package rules remain direct. This makes a freshly installed sing-box client bootstrap without pre-cached .srs assets.

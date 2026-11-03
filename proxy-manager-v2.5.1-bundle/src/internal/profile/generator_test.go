@@ -75,21 +75,16 @@ func TestBothProtocols(t *testing.T) {
 		t.Fatal("proxy missing")
 	}
 }
-func TestRuleSetsUseDirectHTTPClient(t *testing.T) {
+func TestMobileRuleSetsAreInline(t *testing.T) {
 	m := generate(t, srv(true, true), "android")
-	clients := m["http_clients"].([]any)
-	c := clients[0].(map[string]any)
-	if c["tag"] != "rules-direct" || c["detour"] != "direct" {
-		t.Fatalf("unexpected HTTP client: %#v", c)
+	if _, ok := m["http_clients"]; ok {
+		t.Fatal("mobile profile should not require remote HTTP clients")
 	}
 	route := m["route"].(map[string]any)
-	if route["default_http_client"] != "rules-direct" {
-		t.Fatalf("default_http_client=%v", route["default_http_client"])
-	}
 	for _, x := range route["rule_set"].([]any) {
 		rs := x.(map[string]any)
-		if rs["http_client"] != "rules-direct" {
-			t.Fatalf("rule-set %v does not use direct HTTP client", rs["tag"])
+		if rs["type"] != "inline" {
+			t.Fatalf("rule-set %v is not inline", rs["tag"])
 		}
 	}
 }

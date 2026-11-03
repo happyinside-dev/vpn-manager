@@ -40,6 +40,9 @@ VPNM_DIR=/etc/vpn-manager
 VPNM_SERVER=$VPNM_DIR/server.yaml
 VPNM_USERS=$VPNM_DIR/users.yaml
 VPNM_UNIT=/etc/systemd/system/vpn-manager.service
+TG_UNIT=/etc/systemd/system/vpn-manager-telegram.service
+TG_CONFIG=$VPNM_DIR/telegram.json
+TG_TOKEN=$VPNM_DIR/telegram-token
 VPNM_USER=vpn-manager
 VPNM_GROUP=vpn-manager
 STATE_FILE=/etc/proxy-manager/state.json
@@ -52,6 +55,10 @@ die() { echo "[x] $*" >&2; exit 1; }
 
 install_runtime_files() {
   install -d -m 755 /usr/local/libexec
+  if ! command -v qrencode >/dev/null 2>&1; then
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qrencode >/dev/null
+  fi
 
   # The original installer installs itself as /usr/local/sbin/proxy-manager.
   # Preserve that exact installed version as the core implementation.
@@ -68,6 +75,9 @@ VPNM_SERVER=$VPNM_DIR/server.yaml
 VPNM_USERS=$VPNM_DIR/users.yaml
 VPNM_BIN=/usr/local/bin/vpn-manager
 VPNM_UNIT=/etc/systemd/system/vpn-manager.service
+TG_UNIT=/etc/systemd/system/vpn-manager-telegram.service
+TG_CONFIG=$VPNM_DIR/telegram.json
+TG_TOKEN=$VPNM_DIR/telegram-token
 VPNM_USER=vpn-manager
 VPNM_GROUP=vpn-manager
 NGINX_TLS_CONF=/etc/nginx/conf.d/proxy-tls.conf
@@ -95,15 +105,21 @@ backup_configs() {
   [[ -e $VPNM_SERVER ]] && cp -a "$VPNM_SERVER" "$dir/server.yaml"
   [[ -e $VPNM_USERS ]] && cp -a "$VPNM_USERS" "$dir/users.yaml"
   [[ -e $VPNM_UNIT ]] && cp -a "$VPNM_UNIT" "$dir/vpn-manager.service"
+  [[ -e /etc/vpn-manager/telegram.json ]] && cp -a /etc/vpn-manager/telegram.json "$dir/telegram.json"
+  [[ -e /etc/vpn-manager/telegram-token ]] && cp -a /etc/vpn-manager/telegram-token "$dir/telegram-token"
+  [[ -e /etc/systemd/system/vpn-manager-telegram.service ]] && cp -a /etc/systemd/system/vpn-manager-telegram.service "$dir/vpn-manager-telegram.service"
+  # Missing optional Telegram files must not fail the entire sync under set -e.
+  return 0
 }
 
 write_server_snapshot() {
   [[ -s $STATE_FILE ]] || die "State not found: $STATE_FILE"
-  local host port xsni hsni pub sid
+  local host port xsni hsni hinsecure pub sid
   host=$(jq -er '.server.public_ip' "$STATE_FILE")
   port=$(jq -er '.server.port' "$STATE_FILE")
   xsni=$(jq -er '.server.xray_sni' "$STATE_FILE")
   hsni=$(jq -er '.server.hy_sni' "$STATE_FILE")
+  hinsecure=$(jq -r '.server.hy_insecure // false' "$STATE_FILE")
   pub=$(jq -er '.server.reality_public_key' "$STATE_FILE")
   sid=$(jq -er '.server.reality_short_id' "$STATE_FILE")
 
@@ -124,7 +140,7 @@ hysteria2:
   enabled: true
   port: $port
   sni: "$hsni"
-  insecure: false
+  insecure: $hinsecure
   pin_sha256: ""
 EOF_SERVER
   chown root:"$VPNM_GROUP" "$VPNM_SERVER.tmp"
@@ -172,6 +188,68 @@ EOUNIT
   systemctl daemon-reload
 }
 
+write_telegram_unit() {
+  cat >/etc/systemd/system/vpn-manager-telegram.service <<'EOTGUNIT'
+[Unit]
+Description=Proxy VPN Telegram management bot
+After=network-online.target vpn-manager.service xray.service hysteria-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/vpn-manager telegram-bot -config /etc/vpn-manager/telegram.json
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=15s
+PrivateTmp=true
+ProtectHome=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOTGUNIT
+  chmod 644 /etc/systemd/system/vpn-manager-telegram.service
+  systemctl daemon-reload
+}
+
+configure_telegram_if_requested() {
+  write_telegram_unit
+  local token=${VPN_TELEGRAM_BOT_TOKEN:-}
+  local masters=${VPN_TELEGRAM_MASTER_IDS:-${VPN_TELEGRAM_MASTER_ID:-}}
+  local xsni
+  xsni=$(jq -r '.server.xray_sni // empty' "$STATE_FILE")
+
+  if [[ -n $token && -n $masters ]]; then
+    printf '%s\n' "$token" > /etc/vpn-manager/telegram-token
+    chmod 600 /etc/vpn-manager/telegram-token
+    local master_json
+    master_json=$(jq -cn --arg v "$masters" '$v|split(",")|map(gsub("^ +| +$";"")|tonumber)')
+    jq -n \
+      --arg token_file "/etc/vpn-manager/telegram-token" \
+      --arg users_file "/etc/vpn-manager/users.yaml" \
+      --arg manager_path "/usr/local/sbin/proxy-manager" \
+      --arg base_url "https://${xsni}" \
+      --arg profile_name "Proxy VPN" \
+      --arg invites_file "/etc/vpn-manager/telegram-invites.json" \
+      --arg audit_log "/var/log/proxy-manager/telegram-audit.log" \
+      --argjson masters "$master_json" \
+      '{token_file:$token_file,masters:$masters,users_file:$users_file,manager_path:$manager_path,base_url:$base_url,profile_name:$profile_name,invites_file:$invites_file,audit_log:$audit_log}' \
+      > /etc/vpn-manager/telegram.json
+    chmod 600 /etc/vpn-manager/telegram.json
+  fi
+
+  if [[ -s /etc/vpn-manager/telegram-token && -s /etc/vpn-manager/telegram.json ]]; then
+    systemctl enable vpn-manager-telegram >/dev/null 2>&1 || true
+    systemctl restart vpn-manager-telegram
+    log "Telegram bot enabled."
+  else
+    systemctl disable --now vpn-manager-telegram >/dev/null 2>&1 || true
+    warn "Telegram bot not configured. Re-run with VPN_TELEGRAM_BOT_TOKEN and VPN_TELEGRAM_MASTER_ID(S)."
+  fi
+}
+
 inject_nginx() {
   [[ -f $NGINX_TLS_CONF ]] || die "nginx TLS config not found: $NGINX_TLS_CONF"
   if grep -q 'Managed by vpn-manager subscription integration' "$NGINX_TLS_CONF"; then
@@ -208,6 +286,7 @@ main() {
   write_server_snapshot
   sync_users
   write_unit
+  configure_telegram_if_requested
   inject_nginx
   systemctl enable vpn-manager >/dev/null 2>&1 || true
   systemctl restart vpn-manager
@@ -318,3 +397,7 @@ echo "  proxy-manager account disable NAME"
 echo "  proxy-manager account enable NAME"
 echo "  proxy-manager account delete NAME"
 echo "Subscription credentials are synchronized automatically after those commands."
+echo
+echo "Telegram bot setup (optional):"
+echo "  VPN_TELEGRAM_BOT_TOKEN='123:ABC...' VPN_TELEGRAM_MASTER_ID='123456789' sudo -E ./install-with-subscriptions.sh ./proxy-manager-v2.2.sh -S"
+echo "  Multiple masters: VPN_TELEGRAM_MASTER_IDS='123456789,987654321'"

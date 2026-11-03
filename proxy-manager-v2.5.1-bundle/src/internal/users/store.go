@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 
 	"proxy-dev/vpn-manager/internal/config"
 	"proxy-dev/vpn-manager/internal/model"
@@ -133,6 +135,16 @@ func assign(u *model.User, k, v string) error {
 		u.VLESSUUID = v
 	case "hysteria_password":
 		u.HysteriaPassword = v
+	case "telegram_id":
+		if strings.TrimSpace(v) == "" || strings.TrimSpace(v) == "0" {
+			u.TelegramID = 0
+			break
+		}
+		id, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return fmt.Errorf("user %q telegram_id: %w", u.Name, err)
+		}
+		u.TelegramID = id
 	default:
 		return fmt.Errorf("unknown user field %q", k)
 	}
@@ -204,6 +216,7 @@ func SyncFromProxyState(usersPath, statePath string) error {
 			Enabled:          a.Enabled,
 			VLESSUUID:        a.VLESSUUID,
 			HysteriaPassword: a.HysteriaPassword,
+			TelegramID:       existing[name].TelegramID,
 		})
 	}
 	return writeUsersYAMLAtomic(usersPath, synced)
@@ -218,6 +231,17 @@ func randomToken() (string, error) {
 }
 
 func writeUsersYAMLAtomic(path string, users []model.User) error {
+	// Preserve owner/group and permissions of an existing users file so root-side
+	// Telegram administration cannot accidentally revoke the unprivileged
+	// subscription service's read access.
+	var oldMode os.FileMode = 0o600
+	oldUID, oldGID := -1, -1
+	if st, err := os.Stat(path); err == nil {
+		oldMode = st.Mode().Perm()
+		if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+			oldUID, oldGID = int(sys.Uid), int(sys.Gid)
+		}
+	}
 	var b strings.Builder
 	b.WriteString("users:\n")
 	for _, u := range users {
@@ -226,6 +250,9 @@ func writeUsersYAMLAtomic(path string, users []model.User) error {
 		fmt.Fprintf(&b, "    enabled: %t\n", u.Enabled)
 		fmt.Fprintf(&b, "    vless_uuid: %q\n", u.VLESSUUID)
 		fmt.Fprintf(&b, "    hysteria_password: %q\n", u.HysteriaPassword)
+		if u.TelegramID != 0 {
+			fmt.Fprintf(&b, "    telegram_id: %d\n", u.TelegramID)
+		}
 	}
 
 	dir := "."
@@ -264,7 +291,10 @@ func writeUsersYAMLAtomic(path string, users []model.User) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("replace users config: %w", err)
 	}
-	return os.Chmod(path, 0o600)
+	if oldUID >= 0 && oldGID >= 0 {
+		_ = os.Chown(path, oldUID, oldGID)
+	}
+	return os.Chmod(path, oldMode)
 }
 
 // FindByNameFile returns a user from the root-only YAML config for administrative CLI use.
@@ -284,4 +314,78 @@ func FindByNameFile(path, name string) (*model.User, error) {
 		}
 	}
 	return nil, ErrNotFound
+}
+
+// ListFile returns all configured users for administrative use.
+func ListFile(path string) ([]model.User, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read users config: %w", err)
+	}
+	return parseUsersYAML(b)
+}
+
+// FindByTelegramIDFile resolves a Telegram account to exactly one VPN user.
+func FindByTelegramIDFile(path string, id int64) (*model.User, error) {
+	all, err := ListFile(path)
+	if err != nil {
+		return nil, err
+	}
+	for i := range all {
+		if all[i].TelegramID == id {
+			u := all[i]
+			return &u, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+// SetTelegramIDFile binds or unbinds a Telegram numeric user id.
+func SetTelegramIDFile(path, name string, id int64) error {
+	all, err := ListFile(path)
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range all {
+		if id != 0 && all[i].TelegramID == id && all[i].Name != name {
+			return fmt.Errorf("telegram id already bound")
+		}
+		if all[i].Name == name {
+			all[i].TelegramID = id
+			found = true
+		}
+	}
+	if !found {
+		return ErrNotFound
+	}
+	return writeUsersYAMLAtomic(path, all)
+}
+
+// RotateTokenFile replaces only a subscription bearer token. VPN protocol credentials are untouched.
+func RotateTokenFile(path, name string) (string, error) {
+	all, err := ListFile(path)
+	if err != nil {
+		return "", err
+	}
+	var token string
+	found := false
+	for i := range all {
+		if all[i].Name == name {
+			token, err = randomToken()
+			if err != nil {
+				return "", err
+			}
+			all[i].Token = token
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", ErrNotFound
+	}
+	if err := writeUsersYAMLAtomic(path, all); err != nil {
+		return "", err
+	}
+	return token, nil
 }

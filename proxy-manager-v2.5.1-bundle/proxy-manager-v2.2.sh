@@ -40,7 +40,9 @@ set -Eeuo pipefail
 REQUESTED_HY_INSECURE_SET=0
 [[ -v HY_INSECURE ]] && REQUESTED_HY_INSECURE_SET=1
 PORT="${PORT:-443}"
-XRAY_VERSION="${XRAY_VERSION:-v26.3.27}"
+XRAY_VERSION_EXPLICIT=0
+[[ -v XRAY_VERSION ]] && XRAY_VERSION_EXPLICIT=1
+XRAY_VERSION="${XRAY_VERSION:-v26.6.27}"
 XRAY_SNI="${XRAY_SNI:-}"
 HY_SNI="${HY_SNI:-}"
 HY_INSECURE="${HY_INSECURE:-0}"
@@ -64,6 +66,7 @@ HY_CONF=$HY_DIR/config.yaml
 BACKUP_ROOT=/var/backups/proxy-setup
 STATE_DIR=/etc/proxy-manager
 STATE_FILE=$STATE_DIR/state.json
+XRAY_VERSION_PIN=$STATE_DIR/xray-version
 MANAGER_BIN=/usr/local/sbin/proxy-manager
 LOG_DIR=/var/log/proxy-setup
 DEFAULT_ACCOUNT="${DEFAULT_ACCOUNT:-default}"
@@ -129,6 +132,9 @@ CONFIGURATION / STATUS:
   proxy-manager apply                  Regenerate configs from saved state
   proxy-manager status                 Show services and port listeners
   proxy-manager self-test              Run protocol end-to-end tests locally
+  proxy-manager xray version           Show installed/pinned Xray version
+  proxy-manager xray test VERSION      Test one Xray version; rollback on failure
+  proxy-manager xray matrix [VERSIONS] Test candidates and keep first passing version
 
 HELP:
   proxy-manager -h
@@ -142,7 +148,7 @@ INSTALL ENVIRONMENT VARIABLES:
   SITE_DIR=/path/to/site               Static website source directory
   LE_EMAIL=mail@example.com            Let's Encrypt e-mail
   PORT=443                             TCP/UDP VPN port
-  XRAY_VERSION=v26.3.27                Xray version pinned for sing-box REALITY compatibility
+  XRAY_VERSION=v26.6.27                Xray version (may also be pinned by xray matrix)
   SKIP_DNS_CHECK=1                     Skip A-record verification
   SKIP_FIREWALL=1                      Do not modify UFW
   SSH_HARDEN=0                         Do not change SSH authentication
@@ -261,22 +267,36 @@ collect_input() {
 }
 
 # ---------- install Xray and Hysteria 2 ----------
-install_xray() {
-  log "Installing Xray $XRAY_VERSION (pinned for sing-box REALITY compatibility)..."
-  [[ $XRAY_VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-    || die "Invalid XRAY_VERSION: $XRAY_VERSION (expected e.g. v26.3.27)."
+validate_xray_version() {
+  [[ $1 =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die "Invalid Xray version: $1 (expected e.g. v26.7.28)."
+}
 
+install_xray_release() {
+  local version=$1 installed
+  validate_xray_version "$version"
+  log "Installing Xray $version..."
   bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ \
-    install --version "$XRAY_VERSION" -f >/dev/null 2>&1 \
-    || die "Failed to install Xray $XRAY_VERSION."
-
-  command -v xray >/dev/null || die "xray was not found after installation."
-
-  local installed
+    install --version "$version" -f >/dev/null 2>&1 \
+    || return 1
+  command -v xray >/dev/null || return 1
   installed=$(xray version 2>/dev/null | awk 'NR==1 {print $2}')
-  [[ $installed == "${XRAY_VERSION#v}" ]] \
-    || die "Xray version mismatch: requested ${XRAY_VERSION#v}, installed ${installed:-unknown}."
+  [[ $installed == "${version#v}" ]] || return 1
   log "Xray version verified: $installed"
+}
+
+install_xray() {
+  # An explicit environment value wins. Otherwise use the compatibility pin
+  # selected by `proxy-manager xray matrix`, if one exists.
+  if [[ -z ${XRAY_VERSION_EXPLICIT:-} && -s $XRAY_VERSION_PIN ]]; then
+    local pinned
+    pinned=$(tr -d '[:space:]' <"$XRAY_VERSION_PIN")
+    if [[ $pinned =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      XRAY_VERSION=$pinned
+    fi
+  fi
+  log "Installing Xray $XRAY_VERSION (compatibility pin)..."
+  install_xray_release "$XRAY_VERSION" || die "Failed to install Xray $XRAY_VERSION."
 }
 
 install_hysteria() {
@@ -1203,6 +1223,89 @@ transactional_account_change() {
   log "Account operation '$op' applied. Backup: $backup_dir"
 }
 
+current_xray_version() {
+  command -v xray >/dev/null 2>&1 || return 1
+  xray version 2>/dev/null | awk 'NR==1 {print "v" $2}'
+}
+
+pin_xray_version() {
+  local version=$1
+  validate_xray_version "$version"
+  ensure_state_dir
+  printf '%s\n' "$version" >"$XRAY_VERSION_PIN"
+  chmod 600 "$XRAY_VERSION_PIN"
+  chown root:root "$XRAY_VERSION_PIN"
+}
+
+xray_test_version() {
+  local candidate=$1 previous
+  validate_xray_version "$candidate"
+  previous=$(current_xray_version || true)
+  [[ -n $previous ]] || die "Could not determine currently installed Xray version."
+
+  log "Testing Xray compatibility candidate: $candidate (current: $previous)"
+  systemctl stop xray 2>/dev/null || true
+  if ! install_xray_release "$candidate"; then
+    warn "Could not install candidate $candidate. Restoring $previous."
+    install_xray_release "$previous" >/dev/null 2>&1 || die "Failed to restore Xray $previous."
+    systemctl restart xray
+    return 1
+  fi
+
+  # Validate the existing server config before starting the service.
+  if ! xray run -test -config "$XRAY_CONF" >/dev/null 2>&1; then
+    warn "Xray $candidate rejected the existing server config. Restoring $previous."
+    install_xray_release "$previous" >/dev/null 2>&1 || die "Failed to restore Xray $previous."
+    systemctl restart xray
+    return 1
+  fi
+
+  systemctl restart xray
+  sleep 1
+  if ! systemctl is-active --quiet xray; then
+    warn "Xray $candidate service did not start. Restoring $previous."
+    install_xray_release "$previous" >/dev/null 2>&1 || die "Failed to restore Xray $previous."
+    systemctl restart xray
+    return 1
+  fi
+
+  load_state
+  if self_test_xray_e2e; then
+    pin_xray_version "$candidate"
+    log "Xray $candidate PASSED local REALITY E2E and is now pinned."
+    return 0
+  fi
+
+  warn "Xray $candidate failed local REALITY E2E. Restoring $previous."
+  systemctl stop xray 2>/dev/null || true
+  install_xray_release "$previous" >/dev/null 2>&1 || die "Failed to restore Xray $previous."
+  systemctl restart xray
+  return 1
+}
+
+xray_matrix() {
+  local -a candidates=("$@")
+  if (( ${#candidates[@]} == 0 )); then
+    # All are official releases and below the 26.9.8 REALITY compatibility break.
+    candidates=(v26.6.27 v26.6.22 v26.6.1 v26.5.9 v26.5.3 v26.4.25 v26.3.27)
+  fi
+
+  local v
+  echo "Xray compatibility matrix (state/credentials are not modified):"
+  for v in "${candidates[@]}"; do
+    echo
+    echo "=== $v ==="
+    if xray_test_version "$v"; then
+      echo
+      echo "Selected Xray version: $v"
+      echo "Pinned at: $XRAY_VERSION_PIN"
+      echo "Next: test the same subscription from sing-box 1.14.4."
+      return 0
+    fi
+  done
+  die "No Xray candidate passed local REALITY E2E. The original version was restored after each failed candidate."
+}
+
 manager_usage() {
   show_help
 }
@@ -1228,6 +1331,27 @@ manager_main() {
           transactional_account_change "$sub" "$name"
           load_state
           [[ $sub == delete ]] || account_links "$name"
+          ;;
+        *) manager_usage; exit 2 ;;
+      esac
+      ;;
+    xray)
+      case "$sub" in
+        version)
+          printf 'Installed: %s\n' "$(current_xray_version || echo unknown)"
+          if [[ -s $XRAY_VERSION_PIN ]]; then
+            printf 'Pinned:    %s\n' "$(cat "$XRAY_VERSION_PIN")"
+          else
+            echo 'Pinned:    (none)'
+          fi
+          ;;
+        test)
+          [[ -n $name ]] || die "Xray version is required. Example: proxy-manager xray test v26.7.28"
+          xray_test_version "$name"
+          ;;
+        matrix)
+          shift 2
+          xray_matrix "$@"
           ;;
         *) manager_usage; exit 2 ;;
       esac
@@ -1265,7 +1389,7 @@ install_manager_binary() {
 setup_run_log
 
 # Management commands do not participate in install flag parsing.
-if [[ ${1:-} == account || ${1:-} == apply || ${1:-} == status || ${1:-} == self-test ]]; then
+if [[ ${1:-} == account || ${1:-} == apply || ${1:-} == status || ${1:-} == self-test || ${1:-} == xray ]]; then
   manager_main "$@"
   exit 0
 fi
