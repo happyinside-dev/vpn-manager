@@ -1,0 +1,33 @@
+package model
+
+type User struct {
+	Name             string
+	Token            string
+	Enabled          bool
+	VLESSUUID        string
+	HysteriaPassword string
+}
+
+type ServerConfig struct {
+	Host     string
+	VLESS    VLESSConfig
+	Hysteria HysteriaConfig
+}
+
+type VLESSConfig struct {
+	Enabled     bool
+	Port        int
+	SNI         string
+	PublicKey   string
+	ShortID     string
+	Flow        string
+	Fingerprint string
+}
+
+type HysteriaConfig struct {
+	Enabled   bool
+	Port      int
+	SNI       string
+	Insecure  bool
+	PinSHA256 string
+}
