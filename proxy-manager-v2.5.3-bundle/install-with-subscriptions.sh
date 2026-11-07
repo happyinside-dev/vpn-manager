@@ -242,8 +242,12 @@ configure_telegram_if_requested() {
 
   if [[ -s /etc/vpn-manager/telegram-token && -s /etc/vpn-manager/telegram.json ]]; then
     systemctl enable vpn-manager-telegram >/dev/null 2>&1 || true
-    systemctl restart vpn-manager-telegram
-    log "Telegram bot enabled."
+    # Never restart the Telegram bot from an account-triggered subscription sync.
+    # Doing so kills the process that initiated the account operation.
+    if ! systemctl is-active --quiet vpn-manager-telegram; then
+      systemctl start vpn-manager-telegram
+    fi
+    log "Telegram bot enabled (no self-restart during account sync)."
   else
     systemctl disable --now vpn-manager-telegram >/dev/null 2>&1 || true
     warn "Telegram bot not configured. Re-run with VPN_TELEGRAM_BOT_TOKEN and VPN_TELEGRAM_MASTER_ID(S)."

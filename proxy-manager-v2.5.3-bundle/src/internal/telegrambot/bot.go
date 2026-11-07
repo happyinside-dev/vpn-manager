@@ -45,6 +45,7 @@ type Bot struct {
 	log     *slog.Logger
 	masters map[int64]struct{}
 	mu      sync.Mutex
+	pending map[int64]pendingAction
 }
 
 type updateResponse struct {
@@ -53,8 +54,16 @@ type updateResponse struct {
 }
 
 type Update struct {
-	UpdateID int64    `json:"update_id"`
-	Message  *Message `json:"message"`
+	UpdateID int64          `json:"update_id"`
+	Message  *Message       `json:"message"`
+	Callback *CallbackQuery `json:"callback_query"`
+}
+
+type CallbackQuery struct {
+	ID      string   `json:"id"`
+	From    User     `json:"from"`
+	Message *Message `json:"message"`
+	Data    string   `json:"data"`
 }
 
 type Message struct {
@@ -132,7 +141,7 @@ func New(cfg Config, log *slog.Logger) (*Bot, error) {
 	for _, id := range cfg.Masters {
 		masters[id] = struct{}{}
 	}
-	return &Bot{cfg: cfg, token: token, client: &http.Client{Timeout: 70 * time.Second}, log: log, masters: masters}, nil
+	return &Bot{cfg: cfg, token: token, client: &http.Client{Timeout: 70 * time.Second}, log: log, masters: masters, pending: make(map[int64]pendingAction)}, nil
 }
 
 func (b *Bot) Run(ctx context.Context) error {
@@ -154,6 +163,10 @@ func (b *Bot) Run(ctx context.Context) error {
 		}
 		for _, u := range updates {
 			offset = u.UpdateID + 1
+			if u.Callback != nil {
+				b.handleCallback(ctx, *u.Callback)
+				continue
+			}
 			if u.Message == nil || u.Message.Text == "" {
 				continue
 			}
@@ -201,34 +214,57 @@ func splitCommand(s string) (string, []string) {
 }
 
 func (b *Bot) handleMessage(ctx context.Context, m Message) {
+	if m.Chat.ID != m.From.ID {
+		_ = b.sendMessage(ctx, m.Chat.ID, "🔒 Открой личный чат с ботом для управления VPN.")
+		return
+	}
+	if b.handlePending(ctx, m) {
+		return
+	}
 	cmd, args := splitCommand(m.Text)
 	if cmd == "" {
 		return
 	}
 	if b.isMaster(m.From.ID) {
+		if shortcut := masterShortcut(m.Text); shortcut != "" {
+			cmd = shortcut
+			args = nil
+		}
 		b.handleMaster(ctx, m, cmd, args)
 		return
 	}
-	if cmd == "/start" && len(args) == 1 {
-		if err := b.consumeInvite(m.From.ID, args[0]); err == nil {
-			_ = b.sendMessage(ctx, m.Chat.ID, "✅ Telegram привязан к VPN-профилю.\n\nИспользуй /links, чтобы получить ссылки и QR-коды.")
+	if cmd == "/start" && len(args) == 1 || (cmd != "" && !strings.HasPrefix(cmd, "/") && len(args) == 0 && looksLikeInvite(cmd)) {
+		code := cmd
+		if len(args) == 1 {
+			code = args[0]
+		}
+		if err := b.consumeInvite(m.From.ID, code); err == nil {
+			_ = b.sendMessage(ctx, m.Chat.ID, "✅ Telegram привязан к VPN-профилю! Выбери действие ниже 👇")
 			b.audit(m.From.ID, "user", "bind", "self", "success")
+			b.sendMenu(ctx, m.Chat.ID, false)
 			return
 		}
 	}
 	u, err := users.FindByTelegramIDFile(b.cfg.UsersFile, m.From.ID)
 	if err != nil {
-		_ = b.sendMessage(ctx, m.Chat.ID, "🔒 У тебя нет доступа к этому VPN-серверу. Попроси администратора выдать приглашение.")
+		_ = b.sendMessage(ctx, m.Chat.ID, "🔒 Доступ пока не привязан. Попроси администратора прислать одноразовый код и отправь его сюда (можно просто кодом, без /start).")
 		return
+	}
+	if shortcut := userShortcut(m.Text); shortcut != "" {
+		cmd = shortcut
+		args = nil
 	}
 	b.handleUser(ctx, m, *u, cmd, args)
 }
 
 func (b *Bot) handleUser(ctx context.Context, m Message, u model.User, cmd string, args []string) {
 	switch cmd {
-	case "/start", "/help":
+	case "/start", "/help", "/menu":
 		_ = b.sendMessage(ctx, m.Chat.ID, "👋 Proxy VPN\n\n/links — все ссылки и QR\n/android — Android\n/ios — iPhone / iPad\n/macos — macOS\n/linux — Linux\n/tv — Android TV / IPTV\n/universal — универсальный профиль\n/status — статус профиля\n/rotate — новые VPN-секреты\n/rotate_token CONFIRM — новый subscription token")
-	case "/links":
+		b.sendMenu(ctx, m.Chat.ID, false)
+	case "/platforms":
+		b.sendPlatformMenu(ctx, m.Chat.ID, u.Name)
+	case "/links", "/alllinks":
 		b.sendAllLinks(ctx, m.Chat.ID, u)
 	case "/android":
 		b.sendVariant(ctx, m.Chat.ID, u, "Android", "/android", b.cfg.ProfileName+" Android")
@@ -248,6 +284,8 @@ func (b *Bot) handleUser(ctx context.Context, m Message, u model.User, cmd strin
 			state = "🔴 disabled"
 		}
 		_ = b.sendMessage(ctx, m.Chat.ID, fmt.Sprintf("👤 %s\nStatus: %s\nTelegram: linked", u.Name, state))
+	case "/rotate_prompt":
+		b.sendInline(ctx, m.Chat.ID, "⚠️ Сменить VPN-секреты? Профиль останется по прежнему URL, но потребуется обновить его в sing-box и переподключиться.", [][]uiButton{{{Text: "🔄 Подтвердить", Callback: "rotate:" + u.Name}}, {{Text: "Отмена", Callback: "links:" + u.Name}}})
 	case "/rotate":
 		if err := b.runManager(ctx, "account", "rotate", u.Name); err != nil {
 			_ = b.sendMessage(ctx, m.Chat.ID, "❌ Не удалось перегенерировать VPN-секреты: "+safeErr(err))
@@ -275,15 +313,21 @@ func (b *Bot) handleUser(ctx context.Context, m Message, u model.User, cmd strin
 			b.sendAllLinks(ctx, m.Chat.ID, *nu)
 		}
 	default:
-		_ = b.sendMessage(ctx, m.Chat.ID, "Неизвестная команда. /help")
+		_ = b.sendMessage(ctx, m.Chat.ID, "Не понял команду. Выбери действие в меню 👇")
+		b.sendMenu(ctx, m.Chat.ID, false)
 	}
 }
 
 func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []string) {
 	switch cmd {
-	case "/start", "/help":
-		_ = b.sendMessage(ctx, m.Chat.ID, "👑 Proxy VPN master\n\n/users\n/add NAME\n/delete NAME CONFIRM\n/enable NAME\n/disable NAME\n/rotate NAME\n/rotate_token NAME CONFIRM\n/invite NAME\n/unbind NAME\n/links NAME\n/status\n/selftest\n/xray\n/hysteria\n\nБез NAME команды /links, /status и platform-команды работают для привязанного master-профиля, если он есть.")
+	case "/start", "/help", "/menu":
+		_ = b.sendMessage(ctx, m.Chat.ID, "👑 Proxy VPN master\n\n/users\n/add NAME\n/delete NAME CONFIRM\n/enable NAME\n/disable NAME\n/rotate NAME\n/rotate_token NAME CONFIRM\n/invite NAME\n/unbind NAME\n/links NAME\n/status\n/selftest\n/xray\n/hysteria\n\nДля управления нажимай кнопки ниже.")
+		b.sendMenu(ctx, m.Chat.ID, true)
 	case "/users":
+		if len(args) == 0 {
+			b.sendUsersMenu(ctx, m.Chat.ID)
+			return
+		}
 		all, err := users.ListFile(b.cfg.UsersFile)
 		if err != nil {
 			_ = b.sendMessage(ctx, m.Chat.ID, "❌ "+safeErr(err))
@@ -304,14 +348,25 @@ func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []st
 		}
 		_ = b.sendMessage(ctx, m.Chat.ID, s.String())
 	case "/add":
-		if len(args) != 1 {
-			_ = b.sendMessage(ctx, m.Chat.ID, "Usage: /add NAME")
+		if len(args) == 0 {
+			b.startPrompt(ctx, m.Chat.ID, "add", "", "Введи имя нового VPN-профиля (латиница, цифры, дефис, подчёркивание):")
+			return
+		}
+		if len(args) != 1 || !validAccountName(args[0]) {
+			_ = b.sendMessage(ctx, m.Chat.ID, "Имя: латиница, цифры, _ и -, до 32 символов. Например: /add mama")
 			return
 		}
 		name := args[0]
-		if err := b.runManager(ctx, "account", "add", name); err != nil {
-			_ = b.sendMessage(ctx, m.Chat.ID, "❌ "+safeErr(err))
+		if _, err := users.FindByNameFile(b.cfg.UsersFile, name); err == nil {
+			_ = b.sendMessage(ctx, m.Chat.ID, "⚠️ Такой профиль уже существует. Выбери его в списке пользователей.")
 			return
+		}
+		if err := b.runManager(ctx, "account", "add", name); err != nil {
+			if _, check := users.FindByNameFile(b.cfg.UsersFile, name); check != nil {
+				_ = b.sendMessage(ctx, m.Chat.ID, "❌ Создание не завершилось. Администратор может проверить sync и журнал.")
+				return
+			}
+			b.log.Warn("account created but manager returned error", "account", name, "error", safeErr(err))
 		}
 		code, err := b.createInvite(name)
 		if err != nil {
@@ -319,15 +374,19 @@ func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []st
 			return
 		}
 		b.audit(m.From.ID, "master", "create_user", name, "success")
-		_ = b.sendMessage(ctx, m.Chat.ID, fmt.Sprintf("✅ Профиль %s создан.\n\nInvitation code (10 min):\n%s\n\nПользователь должен отправить боту:\n/start %s", name, code, code))
+		_ = b.sendMessage(ctx, m.Chat.ID, "✅ Профиль "+name+" создан.")
+		b.sendInvitation(ctx, m.Chat.ID, name, code)
 	case "/delete":
 		if len(args) != 2 || strings.ToUpper(args[1]) != "CONFIRM" {
 			_ = b.sendMessage(ctx, m.Chat.ID, "Usage: /delete NAME CONFIRM")
 			return
 		}
 		if err := b.runManager(ctx, "account", "delete", args[0]); err != nil {
-			_ = b.sendMessage(ctx, m.Chat.ID, "❌ "+safeErr(err))
-			return
+			if _, check := users.FindByNameFile(b.cfg.UsersFile, args[0]); check == nil {
+				_ = b.sendMessage(ctx, m.Chat.ID, "⚠️ Удаление не завершилось: "+safeErr(err))
+				return
+			}
+			b.log.Warn("account deleted but manager returned error", "account", args[0], "error", safeErr(err))
 		}
 		b.audit(m.From.ID, "master", "delete_user", args[0], "success")
 		_ = b.sendMessage(ctx, m.Chat.ID, "✅ Профиль удалён.")
@@ -372,7 +431,7 @@ func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []st
 			_ = b.sendMessage(ctx, m.Chat.ID, "❌ "+safeErr(err))
 			return
 		}
-		_ = b.sendMessage(ctx, m.Chat.ID, fmt.Sprintf("Invitation for %s (10 min):\n%s\n\n/start %s", args[0], code, code))
+		b.sendInvitation(ctx, m.Chat.ID, args[0], code)
 	case "/unbind":
 		if len(args) != 1 {
 			_ = b.sendMessage(ctx, m.Chat.ID, "Usage: /unbind NAME")
@@ -423,7 +482,8 @@ func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []st
 			b.handleUser(ctx, m, *u, cmd, args)
 			return
 		}
-		_ = b.sendMessage(ctx, m.Chat.ID, "Неизвестная master-команда. /help")
+		_ = b.sendMessage(ctx, m.Chat.ID, "Выбери действие в меню 👇")
+		b.sendMenu(ctx, m.Chat.ID, true)
 	}
 }
 
@@ -470,7 +530,14 @@ func (b *Bot) sendVariant(ctx context.Context, chatID int64, u model.User, label
 		_ = b.sendPhoto(ctx, chatID, png, "📱 "+label+" · QR для импорта")
 	}
 	htmlText := fmt.Sprintf("📱 <b>%s</b>\n\nSource — ручной Remote Profile:\n<pre>%s</pre>\nImport — готовая ссылка для sing-box:\n<pre>%s</pre>", html.EscapeString(label), html.EscapeString(source), html.EscapeString(imp))
-	_ = b.sendHTML(ctx, chatID, htmlText)
+	// Telegram URL buttons accept HTTPS/tg links, not sing-box:// custom schemes.
+	// Open a trusted HTTPS landing page with an explicit import button instead.
+	landingURL := source + "?import=1"
+	if err := b.postUI(ctx, chatID, htmlText, inlineKeyboard{Rows: [][]uiButton{
+		{{Text: "🚀 Импортировать", URL: landingURL}},
+	}}, "HTML"); err != nil {
+		b.log.Warn("telegram import button send failed", "error", err.Error())
+	}
 }
 
 func qrPNG(s string) ([]byte, error) {

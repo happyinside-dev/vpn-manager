@@ -79,3 +79,37 @@ func TestAndroidSubscription(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
+
+func TestImportLanding(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "https://vpn.example.com/sub/good-token-abcdefghijklmnopqrstuvwxyz/android?import=1", nil)
+	w := httptest.NewRecorder()
+	handler().ServeHTTP(w, r)
+	if w.Code != 200 || !strings.Contains(w.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("status %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "sing-box://import-remote-profile?") {
+		t.Fatal("missing import link")
+	}
+	if !strings.Contains(w.Body.String(), "Импортировать в sing-box") {
+		t.Fatal("missing button")
+	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("no-store missing")
+	}
+}
+func TestImportLandingUnknownToken(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "https://vpn.example.com/sub/missing?import=1", nil)
+	w := httptest.NewRecorder()
+	handler().ServeHTTP(w, r)
+	if w.Code != 404 {
+		t.Fatal(w.Code)
+	}
+}
+func TestImportLandingUntrustedHost(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "https://localhost/sub/good-token-abcdefghijklmnopqrstuvwxyz?import=1", nil)
+	w := httptest.NewRecorder()
+	handler().ServeHTTP(w, r)
+	if w.Code != 404 {
+		t.Fatal(w.Code)
+	}
+}
