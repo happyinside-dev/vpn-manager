@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"proxy-dev/vpn-manager/internal/model"
 	"proxy-dev/vpn-manager/internal/users"
 )
 
@@ -154,10 +155,11 @@ func (b *Bot) sendUserCard(ctx context.Context, chatID int64, name string) {
 	})
 }
 func (b *Bot) sendPlatformMenu(ctx context.Context, chatID int64, name string) {
-	b.sendInline(ctx, chatID, "📲 Выбери устройство. Для него придут QR-код, Source и готовая Import-ссылка:", [][]uiButton{
+	b.sendInline(ctx, chatID, "📲 Выбери устройство, затем режим маршрутизации:", [][]uiButton{
 		{{Text: "🤖 Android", Callback: "platform:" + name + ":android"}, {Text: "🍎 iPhone/iPad", Callback: "platform:" + name + ":ios"}},
 		{{Text: "💻 macOS", Callback: "platform:" + name + ":macos"}, {Text: "🐧 Linux", Callback: "platform:" + name + ":linux"}},
 		{{Text: "📺 Android TV", Callback: "platform:" + name + ":tv"}, {Text: "🌐 Universal", Callback: "platform:" + name + ":universal"}},
+		{{Text: "📡 OpenWRT", Callback: "platform:" + name + ":openwrt"}},
 		{{Text: "📦 Все платформы", Callback: "alllinks:" + name}},
 	})
 }
@@ -268,19 +270,25 @@ func (b *Bot) handleCallback(ctx context.Context, c CallbackQuery) {
 	case "links":
 		b.sendPlatformMenu(ctx, chat, account)
 	case "alllinks":
-		b.sendAllLinks(ctx, chat, *u)
+		b.sendRoutingMenu(ctx, chat, account, "all")
 	case "platform":
-		if len(data) != 3 {
+		if len(data) == 3 {
+			if _, ok := platformVariants[data[2]]; ok {
+				b.sendRoutingMenu(ctx, chat, account, data[2])
+			}
+		}
+	case "route":
+		if len(data) != 4 || (data[3] != "bypass-ru" && data[3] != "blocked") {
 			return
 		}
-		variants := map[string]struct{ label, suffix, title string }{
-			"android": {"Android", "/android", " Android"}, "ios": {"iPhone / iPad", "/ios", " iOS"}, "macos": {"macOS", "/macos", " macOS"}, "linux": {"Linux", "/linux", " Linux"}, "tv": {"Android TV / IPTV", "/tv", " TV"}, "universal": {"Universal", "", ""},
+		if data[2] == "all" {
+			for _, platform := range platformOrder {
+				b.sendRoutedVariant(ctx, chat, *u, platform, data[3])
+			}
+		} else {
+			b.sendRoutedVariant(ctx, chat, *u, data[2], data[3])
 		}
-		v, ok := variants[data[2]]
-		if !ok {
-			return
-		}
-		b.sendVariant(ctx, chat, *u, v.label, v.suffix, b.cfg.ProfileName+v.title)
+
 	case "invite":
 		if !master {
 			return
@@ -318,5 +326,33 @@ func (b *Bot) handleCallback(ctx context.Context, c CallbackQuery) {
 		} else {
 			b.handleUser(ctx, Message{Chat: Chat{ID: chat}, From: c.From}, *u, "/rotate", nil)
 		}
+	}
+}
+
+var platformOrder = []string{"universal", "android", "ios", "macos", "linux", "tv", "openwrt"}
+var platformVariants = map[string]string{
+	"universal": "Universal", "android": "Android", "ios": "iPhone / iPad", "macos": "macOS", "linux": "Linux", "tv": "Android TV / IPTV", "openwrt": "OpenWRT",
+}
+
+func (b *Bot) sendRoutingMenu(ctx context.Context, chatID int64, name, platform string) {
+	b.sendInline(ctx, chatID, "Выбери режим:\n\n🌍 Всё через VPN, кроме российских сайтов.\n🎯 Всё напрямую, кроме ресурсов из обновляемого списка блокировок.\n\nВыбор закреплён в ссылке: разные устройства могут использовать разные режимы.", [][]uiButton{
+		{{Text: "🌍 VPN, кроме РФ", Callback: "route:" + name + ":" + platform + ":bypass-ru"}},
+		{{Text: "🎯 Только заблокированные", Callback: "route:" + name + ":" + platform + ":blocked"}},
+		{{Text: "⬅️ Устройства", Callback: "links:" + name}},
+	})
+}
+
+func (b *Bot) sendRoutedVariant(ctx context.Context, chatID int64, u model.User, platform, mode string) {
+	label, ok := platformVariants[platform]
+	if !ok {
+		return
+	}
+	modeLabel := "VPN, кроме РФ"
+	if mode == "blocked" {
+		modeLabel = "Только заблокированные"
+	}
+	b.sendVariant(ctx, chatID, u, label+" · "+modeLabel, "/"+platform+"/"+mode, b.cfg.ProfileName+" "+label+" · "+modeLabel)
+	if platform == "openwrt" {
+		_ = b.sendMessage(ctx, chatID, "OpenWRT: Source отдаёт JSON для sing-box (TUN + auto_redirect/fw4). Сохрани его в /etc/sing-box/config.json и проверь: sing-box check -c /etc/sing-box/config.json. Нужны kmod-tun, nftables/fw4 и sing-box с поддержкой выбранного протокола. DNS клиентов LAN должен идти через роутер. Инструкция по установке и DNS — в ROUTING.md комплекта.")
 	}
 }

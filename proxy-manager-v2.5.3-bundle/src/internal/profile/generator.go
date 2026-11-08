@@ -13,6 +13,7 @@ import (
 type Generator interface {
 	Generate(context.Context, model.User, model.ServerConfig) ([]byte, error)
 	GenerateForPlatform(context.Context, model.User, model.ServerConfig, string) ([]byte, error)
+	GenerateWithRouting(context.Context, model.User, model.ServerConfig, string, string) ([]byte, error)
 }
 
 type SingBoxGenerator struct{}
@@ -23,10 +24,17 @@ func (g *SingBoxGenerator) Generate(ctx context.Context, u model.User, s model.S
 	return g.GenerateForPlatform(ctx, u, s, "universal")
 }
 
-func (g *SingBoxGenerator) GenerateForPlatform(_ context.Context, u model.User, s model.ServerConfig, platform string) ([]byte, error) {
+func (g *SingBoxGenerator) GenerateForPlatform(ctx context.Context, u model.User, s model.ServerConfig, platform string) ([]byte, error) {
+	return g.GenerateWithRouting(ctx, u, s, platform, "")
+}
+
+func (g *SingBoxGenerator) GenerateWithRouting(_ context.Context, u model.User, s model.ServerConfig, platform, mode string) ([]byte, error) {
+	if mode != "" && mode != "bypass-ru" && mode != "blocked" {
+		return nil, fmt.Errorf("unsupported routing mode %q", mode)
+	}
 	platform = strings.ToLower(strings.TrimSpace(platform))
 	switch platform {
-	case "", "universal", "android", "ios", "macos", "linux", "tv":
+	case "", "universal", "android", "ios", "macos", "linux", "tv", "openwrt":
 		if platform == "" {
 			platform = "universal"
 		}
@@ -94,8 +102,13 @@ func (g *SingBoxGenerator) GenerateForPlatform(_ context.Context, u model.User, 
 	inbound := map[string]any{
 		"type": "tun", "tag": "tun-in", "address": []string{"172.19.0.1/30"}, "auto_route": true,
 	}
-	if platform == "android" || platform == "tv" || platform == "linux" || platform == "universal" {
+	if platform == "android" || platform == "tv" || platform == "linux" || platform == "universal" || platform == "openwrt" {
 		inbound["auto_redirect"] = true
+	}
+
+	if platform == "openwrt" {
+		inbound["interface_name"] = "singtun0"
+		inbound["address"] = []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"}
 	}
 
 	// Keep mobile bootstrap self-contained. Fresh sing-box installs must not
@@ -141,7 +154,7 @@ func (g *SingBoxGenerator) GenerateForPlatform(_ context.Context, u model.User, 
 		})
 	}
 
-	if platform == "tv" {
+	if platform == "tv" || platform == "openwrt" {
 		routeRules = append(routeRules,
 			map[string]any{"ip_cidr": []string{"224.0.0.0/4", "ff00::/8"}, "outbound": "direct"},
 		)
@@ -183,9 +196,52 @@ func (g *SingBoxGenerator) GenerateForPlatform(_ context.Context, u model.User, 
 		},
 	}
 
+	// Explicit subscription modes have independent routing and DNS policies.
+	// Legacy URLs keep their existing inline-only bootstrap behavior.
+	route := cfg["route"].(map[string]any)
+	dns := cfg["dns"].(map[string]any)
+	if mode != "" {
+		cfg["http_clients"] = []any{map[string]any{"tag": "rules-vpn", "detour": "proxy", "domain_resolver": "dns-bootstrap"}}
+		route["default_http_client"] = "rules-vpn"
+	}
+	if mode == "bypass-ru" {
+		ruleSets = append(ruleSets, remoteRuleSet("geoip-ru", "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs"))
+		route["rule_set"] = ruleSets
+		route["rules"] = append(routeRules, map[string]any{"rule_set": []string{"geoip-ru"}, "outbound": "direct"})
+	}
+	if mode == "blocked" {
+		route["rule_set"] = []any{
+			remoteRuleSet("ru-blocked", "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geosite/geosite-ru-blocked.srs"),
+			remoteRuleSet("ru-blocked-ip", "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geoip/geoip-ru-blocked.srs"),
+		}
+		route["rules"] = []any{
+			map[string]any{"action": "sniff"},
+			map[string]any{"protocol": "dns", "action": "hijack-dns"},
+			map[string]any{"ip_is_private": true, "outbound": "direct"},
+			map[string]any{"ip_cidr": []string{"224.0.0.0/4", "ff00::/8"}, "outbound": "direct"},
+			map[string]any{"rule_set": []string{"ru-blocked", "ru-blocked-ip"}, "outbound": "proxy"},
+		}
+		route["final"] = "direct"
+		dns["rules"] = []any{map[string]any{"rule_set": []string{"ru-blocked"}, "server": "dns-remote"}}
+		dns["final"] = "dns-direct"
+	}
+	if platform == "openwrt" {
+		cfg["inbounds"] = []any{inbound, map[string]any{"type": "direct", "tag": "dns-in", "listen": "127.0.0.1", "listen_port": 5353}}
+		route["rules"] = append([]any{map[string]any{"inbound": []string{"dns-in"}, "action": "hijack-dns"}}, route["rules"].([]any)...)
+		// A router has no GUI selector. Avoid exposing a controller and keep the
+		// downloaded rule-set cache in the writable runtime directory.
+		cfg["experimental"] = map[string]any{"cache_file": map[string]any{"enabled": true, "path": "/tmp/sing-box-cache.db"}}
+	}
+
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal sing-box profile: %w", err)
 	}
 	return append(b, '\n'), nil
+}
+
+// Download through the configured VPN so rules can bootstrap even if their
+// hosting is blocked by the local ISP. sing-box caches them between restarts.
+func remoteRuleSet(tag, url string) map[string]any {
+	return map[string]any{"type": "remote", "tag": tag, "format": "binary", "url": url, "http_client": "rules-vpn", "update_interval": "1d"}
 }

@@ -79,13 +79,18 @@ func syncUsers(args []string) {
 
 func printLinks(args []string) {
 	fs := flag.NewFlagSet("links", flag.ExitOnError)
-	var usersFile, baseURL, profileName string
+	var usersFile, baseURL, profileName, routing string
 	fs.StringVar(&usersFile, "users-config", "/etc/vpn-manager/users.yaml", "users config path")
 	fs.StringVar(&baseURL, "base-url", "", "public HTTPS base URL")
 	fs.StringVar(&profileName, "profile-name", "Proxy VPN", "remote profile display name")
+	fs.StringVar(&routing, "routing", "", "routing mode: bypass-ru or blocked (empty preserves legacy URLs)")
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 || baseURL == "" {
 		fmt.Fprintln(os.Stderr, "usage: vpn-manager links --base-url https://vpn.example.com [--users-config path] USER")
+		os.Exit(2)
+	}
+	if routing != "" && routing != "bypass-ru" && routing != "blocked" {
+		fmt.Fprintln(os.Stderr, "routing must be bypass-ru or blocked")
 		os.Exit(2)
 	}
 	name := fs.Arg(0)
@@ -102,12 +107,20 @@ func printLinks(args []string) {
 		{"macOS", "/macos", profileName + " macOS"},
 		{"Linux", "/linux", profileName + " Linux"},
 		{"Android TV / IPTV", "/tv", profileName + " TV"},
+		{"OpenWRT", "/openwrt", profileName + " OpenWRT"},
 	}
 	fmt.Printf("Subscription links for %s:\n", name)
 	if !u.Enabled {
 		fmt.Println("Status: disabled")
 	}
 	for _, v := range variants {
+		if routing != "" {
+			if v.suffix == "" {
+				v.suffix = "/universal"
+			}
+			v.suffix += "/" + routing
+			v.title += " " + routing
+		}
 		sub := fmt.Sprintf("%s/sub/%s%s", baseURL, u.Token, v.suffix)
 		fmt.Printf("\n%s:\n%s\nImport:\n%s\n", v.label, sub, importurl.Build(sub, v.title))
 	}

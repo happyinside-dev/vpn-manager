@@ -110,3 +110,47 @@ func findTag(m map[string]any, tag string) (map[string]any, bool) {
 	}
 	return nil, false
 }
+
+func TestRoutingModes(t *testing.T) {
+	for _, platform := range []string{"universal", "android", "ios", "macos", "linux", "tv", "openwrt"} {
+		for _, mode := range []string{"bypass-ru", "blocked"} {
+			t.Run(platform+"/"+mode, func(t *testing.T) {
+				b, err := New().GenerateWithRouting(context.Background(), usr, srv(true, true), platform, mode)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var cfg map[string]any
+				if err := json.Unmarshal(b, &cfg); err != nil {
+					t.Fatal(err)
+				}
+				route := cfg["route"].(map[string]any)
+				dns := cfg["dns"].(map[string]any)
+				wantRoute, wantDNS := "proxy", "dns-remote"
+				if mode == "blocked" {
+					wantRoute, wantDNS = "direct", "dns-direct"
+				}
+				if route["final"] != wantRoute || dns["final"] != wantDNS {
+					t.Fatal("wrong routing or DNS policy")
+				}
+				if mode == "blocked" && (strings.Contains(string(b), "package_name_regex") || strings.Contains(string(b), "ru-yandex")) {
+					t.Fatal("Russian bypass overrides blocked resources")
+				}
+				if platform == "openwrt" {
+					inbound := cfg["inbounds"].([]any)[0].(map[string]any)
+					if inbound["auto_redirect"] != true || inbound["interface_name"] != "singtun0" || len(inbound["address"].([]any)) != 2 {
+						t.Fatal("router TUN settings missing")
+					}
+					if strings.Contains(string(b), "clash_api") {
+						t.Fatal("router controller exposed")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRejectInvalidRouting(t *testing.T) {
+	if _, err := New().GenerateWithRouting(context.Background(), usr, srv(true, true), "openwrt", "typo"); err == nil {
+		t.Fatal("invalid mode accepted")
+	}
+}

@@ -20,6 +20,9 @@ func (s *Service) Generate(ctx context.Context, token string) ([]byte, error) {
 	return s.GenerateForPlatform(ctx, token, "universal")
 }
 func (s *Service) GenerateForPlatform(ctx context.Context, token, platform string) ([]byte, error) {
+	return s.GenerateWithRouting(ctx, token, platform, "")
+}
+func (s *Service) GenerateWithRouting(ctx context.Context, token, platform, mode string) ([]byte, error) {
 	u, err := s.users.FindByToken(ctx, token)
 	if err != nil {
 		return nil, err
@@ -28,5 +31,5 @@ func (s *Service) GenerateForPlatform(ctx context.Context, token, platform strin
 	if err != nil {
 		return nil, err
 	}
-	return s.profile.GenerateForPlatform(ctx, *u, *sv, platform)
+	return s.profile.GenerateWithRouting(ctx, *u, *sv, platform, mode)
 }

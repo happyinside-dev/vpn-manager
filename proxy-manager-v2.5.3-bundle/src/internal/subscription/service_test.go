@@ -52,3 +52,7 @@ func TestErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func (g gen) GenerateWithRouting(context.Context, model.User, model.ServerConfig, string, string) ([]byte, error) {
+	return g.b, g.err
+}

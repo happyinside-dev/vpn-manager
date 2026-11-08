@@ -8,9 +8,9 @@ import (
 	"regexp"
 	"strings"
 
-	"proxy-dev/vpn-manager/internal/importurl"
 	"log/slog"
 	"net/http"
+	"proxy-dev/vpn-manager/internal/importurl"
 	"time"
 
 	"proxy-dev/vpn-manager/internal/subscription"
@@ -35,7 +35,12 @@ func New(addr string, svc *subscription.Service, log *slog.Logger) *Server {
 				http.NotFound(w, r)
 				return
 			}
-			b, err := svc.GenerateForPlatform(r.Context(), token, platform)
+			mode := r.PathValue("mode")
+			if mode != "" && mode != "bypass-ru" && mode != "blocked" {
+				http.NotFound(w, r)
+				return
+			}
+			b, err := svc.GenerateWithRouting(r.Context(), token, platform, mode)
 			if err != nil {
 				if !errors.Is(err, users.ErrNotFound) {
 					log.Error("subscription generation failed", "error", err, "platform", platform)
@@ -53,6 +58,9 @@ func New(addr string, svc *subscription.Service, log *slog.Logger) *Server {
 				}
 				sourceURL := "https://" + publicHost + r.URL.Path
 				title := "Proxy VPN"
+				if mode != "" {
+					title += " " + mode
+				}
 				if platform != "universal" {
 					title += " " + platform
 				}
@@ -76,6 +84,11 @@ func New(addr string, svc *subscription.Service, log *slog.Logger) *Server {
 	mux.HandleFunc("GET /sub/{token}/macos", serveSub("macos"))
 	mux.HandleFunc("GET /sub/{token}/linux", serveSub("linux"))
 	mux.HandleFunc("GET /sub/{token}/tv", serveSub("tv"))
+	mux.HandleFunc("GET /sub/{token}/openwrt", serveSub("openwrt"))
+	mux.HandleFunc("GET /sub/{token}/universal", serveSub("universal"))
+	for _, platform := range []string{"universal", "android", "ios", "macos", "linux", "tv", "openwrt"} {
+		mux.HandleFunc("GET /sub/{token}/"+platform+"/{mode}", serveSub(platform))
+	}
 
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.ContentLength > 4096 {

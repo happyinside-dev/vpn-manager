@@ -2,13 +2,14 @@ package httpserver
 
 import (
 	"context"
-	"proxy-dev/vpn-manager/internal/model"
-	"proxy-dev/vpn-manager/internal/subscription"
-	"proxy-dev/vpn-manager/internal/users"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"proxy-dev/vpn-manager/internal/model"
+	"proxy-dev/vpn-manager/internal/subscription"
+	"proxy-dev/vpn-manager/internal/users"
 	"strings"
 	"testing"
 )
@@ -111,5 +112,43 @@ func TestImportLandingUntrustedHost(t *testing.T) {
 	handler().ServeHTTP(w, r)
 	if w.Code != 404 {
 		t.Fatal(w.Code)
+	}
+}
+
+func (gen) GenerateWithRouting(_ context.Context, _ model.User, _ model.ServerConfig, platform, mode string) ([]byte, error) {
+	return json.Marshal(map[string]string{"platform": platform, "mode": mode})
+}
+
+func TestRoutedSubscriptions(t *testing.T) {
+	for _, platform := range []string{"universal", "android", "ios", "macos", "linux", "tv", "openwrt"} {
+		for _, mode := range []string{"bypass-ru", "blocked"} {
+			path := "/sub/good-token-abcdefghijklmnopqrstuvwxyz/" + platform + "/" + mode
+			for _, query := range []string{"", "?import=1"} {
+				w := httptest.NewRecorder()
+				handler().ServeHTTP(w, httptest.NewRequest("GET", "https://vpn.example.com"+path+query, nil))
+				if w.Code != 200 {
+					t.Fatalf("%s: %d", path+query, w.Code)
+				}
+				if query == "" {
+					var got map[string]string
+					if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+						t.Fatal(err)
+					}
+					if got["platform"] != platform || got["mode"] != mode {
+						t.Fatal("wrong generator arguments")
+					}
+				}
+				if query != "" && !strings.Contains(w.Body.String(), path) {
+					t.Fatal("landing page lost routing mode")
+				}
+			}
+		}
+	}
+	for _, path := range []string{"/sub/good-token-abcdefghijklmnopqrstuvwxyz/openwrt/typo", "/sub/missing/openwrt/blocked", "/sub/good-token-abcdefghijklmnopqrstuvwxyz/unknown/blocked"} {
+		w := httptest.NewRecorder()
+		handler().ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != 404 {
+			t.Fatalf("%s: %d", path, w.Code)
+		}
 	}
 }

@@ -1,40 +1,121 @@
-# Platform routing
+# Устройства и маршрутизация
 
-## Android
+В Telegram: **Мои ссылки → устройство → режим**. У администратора:
+**Пользователи → профиль → Ссылки → устройство → режим**.
+Команды `/android`, `/ios`, `/macos`, `/linux`, `/tv`, `/universal`, `/openwrt`
+также открывают выбор режима. `/links` предлагает выбрать режим для всех устройств.
 
-The Android profile uses sing-box `package_name_regex`, which is supported by
-the Android graphical client. Matching traffic is sent to `direct`; everything
-else ends at the `VPN` selector.
+Режим закреплён в URL, без изменения пользователя, VPN-секретов и токена:
 
-The broad application matcher covers brand/package names containing terms such
-as Sber, VTB, T-Bank/Tinkoff, Alfa, Gazprombank, Ozon, Wildberries, Yandex,
-VK, MAX/oneme, Gosuslugi/Rostel, RuTube, Kinopoisk, IVI, Okko, Wink, Premier,
-Smotrim, MTS, Megafon, Beeline, T2/Tele2, MirPay/SBPay, Megamarket, Avito and
-2GIS.
+- `https://HOST/sub/TOKEN/openwrt/bypass-ru` — всё через VPN, кроме российских
+  доменов (.ru/.su/.рф, встроенные группы Yandex/VK/госуслуг) и IP из GeoIP RU.
+- `https://HOST/sub/TOKEN/openwrt/blocked` — всё напрямую, кроме доменов и IP
+  из списков блокировок Runet Freedom.
 
-Known current package IDs independently verified during implementation include:
-- ru.sberbankmobile
-- ru.alfabank.mobile.android
-- ru.gazprombank.android.mobilebank.app
-- ru.vtb24.mobilebanking.android
-- ru.rostel
-- ru.ozon.app.android
-- ru.oneme.app
-- com.vkontakte.android
+Вместо `openwrt` доступны `android`, `ios`, `macos`, `linux`, `tv`, `universal`.
+Source, Import, QR и HTTPS-страница импорта используют один и тот же режим.
+Старые URL без режима продолжают работать с прежними встроенными правилами.
+На разных устройствах можно использовать разные режимы одновременно.
 
-## Russian network bypass
+## Что именно считается российским или заблокированным
 
-The mobile/TV profiles also send these directly:
-- .ru, .su, .xn--p1ai domains;
-- Yandex/VK/government remote rule-sets;
-- geoip-ru;
-- RFC1918/private destinations;
-- IPv4/IPv6 multicast, including IPTV/LAN discovery paths.
+`bypass-ru`: российские домены/сервисы и GeoIP RU идут напрямую, остальное —
+через селектор `proxy`. DNS российских доменов использует 77.88.8.8 напрямую,
+остальных — Cloudflare DoH через VPN. На Android/TV сохранены правила российских
+приложений по `package_name_regex`; на Apple, Linux и OpenWRT их нет.
+Классификация определяется правилами и геолокацией IP, а не гражданством владельца сайта.
 
-DNS for the same Russian domain/rule-set groups is sent to 77.88.8.8 directly.
-Other DNS uses Cloudflare DoH through the VPN selector.
+`blocked`: только совпадения с `geosite-ru-blocked` и `geoip-ru-blocked` идут
+через VPN; остальной трафик и DNS — напрямую. DNS доменов из списка блокировок
+идёт через VPN. Российские доменные и Android package-исключения в этом режиме
+не применяются: заблокированный .ru-домен тоже должен попасть в VPN.
+Списки не гарантируют совпадения со всеми блокировками конкретного провайдера;
+IP-списки также могут затрагивать соседние сайты на общем адресе.
 
-## Apple
+Оба режима оставляют локальные сети напрямую; OpenWRT/TV также обходят VPN для
+multicast, включая IPTV. OpenWRT перехватывает IPv4 и IPv6, DNS резолвит IPv4.
 
-iOS/macOS do not have Android package-name matching, so platform profiles use
-the Russian domain/IP/rule-set bypass only.
+Источники обновляемых правил:
+
+- https://github.com/runetfreedom/russia-v2ray-rules-dat
+- https://github.com/SagerNet/sing-geoip
+
+Новые режимы загружают бинарные `.srs` через VPN с интервалом 1 день.
+При первом запуске нужны рабочий VPN и доступность источника; при сбое загрузки
+sing-box может не запуститься. Кэш сохраняется между перезапусками процесса,
+на OpenWRT хранится в `/tmp/sing-box-cache.db` и пропадает после перезагрузки роутера.
+
+## OpenWRT
+
+Это полный JSON для **отдельного sing-box**, а не конфиг PassWall, OpenClash
+или mihomo. Проверка синтаксиса выполнена sing-box 1.14.4. Нужны сборка с
+поддержкой VLESS/REALITY (uTLS) и/или Hysteria2 (QUIC), `kmod-tun`, nftables/fw4
+и права для настройки TUN/маршрутов. Официальное описание `auto_redirect` и
+интеграции с fw4: https://sing-box.sagernet.org/configuration/inbound/tun/ .
+
+1. Установи подходящие пакеты sing-box и kmod-tun для своей версии и архитектуры
+   OpenWRT. Не запускай одновременно другой менеджер прозрачного прокси.
+2. Сохрани Source из бота как `/etc/sing-box/config.json` (файл содержит секреты,
+   права `0600`). Сначала проверь его командой:
+
+   ```sh
+   sing-box check -c /etc/sing-box/config.json
+   ```
+
+3. Убедись, что init-служба sing-box использует этот путь, и запусти её.
+   Конфиг создаёт `singtun0`, включает `auto_route`/`auto_redirect` и автоматический
+   выбор исходящего интерфейса. LAN и multicast идут напрямую. Подсети
+   `172.19.0.0/30` и `fdfe:dcba:9876::/126` не должны пересекаться с твоей сетью.
+4. DNS клиентов LAN должен проходить через sing-box. Для этого в JSON есть
+   отдельный DNS-вход `127.0.0.1:5353` (TCP/UDP). Обычные DNS-запросы к LAN-адресу
+   самого роутера не перехватываются TUN автоматически. Если dnsmasq обслуживает
+   LAN, укажи ему единственный upstream `127.0.0.1#5353` и отключи чтение upstream
+   из resolv.conf. Пример для стандартного единственного экземпляра dnsmasq:
+
+   ```sh
+   cp /etc/config/dhcp /etc/config/dhcp.before-sing-box
+   uci set 'dhcp.@dnsmasq[0].noresolv=1'
+   uci -q delete 'dhcp.@dnsmasq[0].server'
+   uci add_list 'dhcp.@dnsmasq[0].server=127.0.0.1#5353'
+   uci commit dhcp
+   /etc/init.d/dnsmasq restart
+   ```
+
+   Пример заменяет существующие upstream DNS. Если нужны локальные зоны или
+   отдельные DNS для доменов, сохрани соответствующие настройки. LAN-клиенты
+   должны получать роутер как DNS по DHCP. Клиентский DoH/DoT обходит эти DNS-правила.
+5. Проверь с устройства LAN российский, заблокированный и обычный иностранный
+   сайт, IPv4/IPv6 и доступ к самому роутеру. Проверка JSON не заменяет этот тест
+   на реальном роутере. Для отката DNS восстанови `/etc/config/dhcp` из копии
+   и перезапусти dnsmasq.
+
+Source — URL подписки, но штатная служба sing-box на OpenWRT сама не обновляет
+JSON по URL. Для обновления скачай его во временный файл, выполни `sing-box check`,
+после успешной проверки замени рабочий файл и перезапусти службу. Правила `.srs`
+при этом обновляются самим sing-box автоматически.
+
+## Установка обновления на VPS
+
+Из каталога этого комплекта:
+
+```sh
+sudo ./upgrade-telegram-only.sh
+```
+
+Скрипт устанавливает пересобранный `vpn-manager`, обновляет helper подписок и
+перезапускает backend/бота; Xray/Hysteria и пользовательские секреты не меняет.
+Переустановка VPS не требуется. После обновления выбери устройство и режим в боте.
+
+CLI тоже поддерживает режим:
+
+```sh
+vpn-manager links --base-url https://vpn.example.com --routing blocked USER
+vpn-manager links --base-url https://vpn.example.com --routing bypass-ru USER
+```
+
+Для пересборки бинарника из исходников:
+
+```sh
+cd src
+CGO_ENABLED=0 go build -trimpath -o ../vpn-manager ./cmd/vpn-manager
+```

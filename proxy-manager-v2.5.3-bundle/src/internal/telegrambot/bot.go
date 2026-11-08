@@ -260,24 +260,14 @@ func (b *Bot) handleMessage(ctx context.Context, m Message) {
 func (b *Bot) handleUser(ctx context.Context, m Message, u model.User, cmd string, args []string) {
 	switch cmd {
 	case "/start", "/help", "/menu":
-		_ = b.sendMessage(ctx, m.Chat.ID, "👋 Proxy VPN\n\n/links — все ссылки и QR\n/android — Android\n/ios — iPhone / iPad\n/macos — macOS\n/linux — Linux\n/tv — Android TV / IPTV\n/universal — универсальный профиль\n/status — статус профиля\n/rotate — новые VPN-секреты\n/rotate_token CONFIRM — новый subscription token")
+		_ = b.sendMessage(ctx, m.Chat.ID, "👋 Proxy VPN\n\n/links — все ссылки и QR\n/android — Android\n/ios — iPhone / iPad\n/macos — macOS\n/linux — Linux\n/tv — Android TV / IPTV\n/openwrt — роутер OpenWRT\n/universal — универсальный профиль\n/status — статус профиля\n/rotate — новые VPN-секреты\n/rotate_token CONFIRM — новый subscription token")
 		b.sendMenu(ctx, m.Chat.ID, false)
 	case "/platforms":
 		b.sendPlatformMenu(ctx, m.Chat.ID, u.Name)
 	case "/links", "/alllinks":
 		b.sendAllLinks(ctx, m.Chat.ID, u)
-	case "/android":
-		b.sendVariant(ctx, m.Chat.ID, u, "Android", "/android", b.cfg.ProfileName+" Android")
-	case "/ios":
-		b.sendVariant(ctx, m.Chat.ID, u, "iPhone / iPad", "/ios", b.cfg.ProfileName+" iOS")
-	case "/macos":
-		b.sendVariant(ctx, m.Chat.ID, u, "macOS", "/macos", b.cfg.ProfileName+" macOS")
-	case "/linux":
-		b.sendVariant(ctx, m.Chat.ID, u, "Linux", "/linux", b.cfg.ProfileName+" Linux")
-	case "/tv":
-		b.sendVariant(ctx, m.Chat.ID, u, "Android TV / IPTV", "/tv", b.cfg.ProfileName+" TV")
-	case "/universal":
-		b.sendVariant(ctx, m.Chat.ID, u, "Universal", "", b.cfg.ProfileName)
+	case "/android", "/ios", "/macos", "/linux", "/tv", "/universal", "/openwrt":
+		b.sendRoutingMenu(ctx, m.Chat.ID, u.Name, strings.TrimPrefix(cmd, "/"))
 	case "/status":
 		state := "🟢 enabled"
 		if !u.Enabled {
@@ -510,17 +500,7 @@ func (b *Bot) runManagerOutput(ctx context.Context, args ...string) (string, err
 }
 
 func (b *Bot) sendAllLinks(ctx context.Context, chatID int64, u model.User) {
-	variants := []struct{ label, suffix, title string }{
-		{"Universal", "", b.cfg.ProfileName},
-		{"Android", "/android", b.cfg.ProfileName + " Android"},
-		{"iPhone / iPad", "/ios", b.cfg.ProfileName + " iOS"},
-		{"macOS", "/macos", b.cfg.ProfileName + " macOS"},
-		{"Linux", "/linux", b.cfg.ProfileName + " Linux"},
-		{"Android TV / IPTV", "/tv", b.cfg.ProfileName + " TV"},
-	}
-	for _, v := range variants {
-		b.sendVariant(ctx, chatID, u, v.label, v.suffix, v.title)
-	}
+	b.sendRoutingMenu(ctx, chatID, u.Name, "all")
 }
 
 func (b *Bot) sendVariant(ctx context.Context, chatID int64, u model.User, label, suffix, title string) {
