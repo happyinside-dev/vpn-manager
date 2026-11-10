@@ -37,6 +37,8 @@ func looksLikeInvite(s string) bool {
 }
 func masterShortcut(s string) string {
 	switch strings.TrimSpace(s) {
+	case "📊 Трафик":
+		return "/traffic"
 	case "👥 Пользователи":
 		return "/users"
 	case "➕ Создать профиль":
@@ -52,6 +54,8 @@ func masterShortcut(s string) string {
 }
 func userShortcut(s string) string {
 	switch strings.TrimSpace(s) {
+	case "📊 Мой трафик":
+		return "/traffic"
 	case "🔗 Мои ссылки":
 		return "/platforms"
 	case "🔄 Новые секреты":
@@ -96,11 +100,12 @@ func (b *Bot) sendMenu(ctx context.Context, chatID int64, master bool) {
 		rows = [][]map[string]string{
 			{{"text": "👥 Пользователи"}, {"text": "➕ Создать профиль"}},
 			{{"text": "🖥 Сервер"}, {"text": "🧪 Self-test"}},
-			{{"text": "🏠 Меню"}},
+			{{"text": "📊 Трафик"}, {"text": "🏠 Меню"}},
 		}
 	} else {
 		rows = [][]map[string]string{
 			{{"text": "🔗 Мои ссылки"}, {"text": "ℹ️ Статус"}},
+			{{"text": "📊 Мой трафик"}},
 			{{"text": "🔄 Новые секреты"}, {"text": "🏠 Меню"}},
 		}
 	}
@@ -148,6 +153,7 @@ func (b *Bot) sendUserCard(ctx context.Context, chatID int64, name string) {
 	}
 	b.sendInline(ctx, chatID, fmt.Sprintf("👤 %s\n%s\nTelegram привязан: %s", name, state, linked), [][]uiButton{
 		{{Text: "🔗 Ссылки", Callback: "links:" + name}, {Text: "🔑 Новый код", Callback: "invite:" + name}},
+		{{Text: "📊 Трафик", Callback: "traffic:" + name}},
 		{{Text: "🔄 Сменить секреты", Callback: "confirm-rotate:" + name}},
 		{{Text: toggle, Callback: act + ":" + name}, {Text: "🗑 Удалить", Callback: "confirm-delete:" + name}},
 		{{Text: "🔓 Отвязать Telegram", Callback: "confirm-unbind:" + name}},
@@ -263,6 +269,8 @@ func (b *Bot) handleCallback(ctx context.Context, c CallbackQuery) {
 		return
 	}
 	switch action {
+	case "traffic":
+		b.sendTraffic(ctx, chat, account)
 	case "user":
 		if master {
 			b.sendUserCard(ctx, chat, account)

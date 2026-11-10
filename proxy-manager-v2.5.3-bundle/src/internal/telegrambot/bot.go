@@ -24,21 +24,24 @@ import (
 
 	"proxy-dev/vpn-manager/internal/importurl"
 	"proxy-dev/vpn-manager/internal/model"
+	"proxy-dev/vpn-manager/internal/traffic"
 	"proxy-dev/vpn-manager/internal/users"
 )
 
 type Config struct {
-	TokenFile   string  `json:"token_file"`
-	Masters     []int64 `json:"masters"`
-	UsersFile   string  `json:"users_file"`
-	ManagerPath string  `json:"manager_path"`
-	BaseURL     string  `json:"base_url"`
-	ProfileName string  `json:"profile_name"`
-	InvitesFile string  `json:"invites_file"`
-	AuditLog    string  `json:"audit_log"`
+	Traffic     traffic.Config `json:"traffic"`
+	TokenFile   string         `json:"token_file"`
+	Masters     []int64        `json:"masters"`
+	UsersFile   string         `json:"users_file"`
+	ManagerPath string         `json:"manager_path"`
+	BaseURL     string         `json:"base_url"`
+	ProfileName string         `json:"profile_name"`
+	InvitesFile string         `json:"invites_file"`
+	AuditLog    string         `json:"audit_log"`
 }
 
 type Bot struct {
+	traffic *traffic.Collector
 	cfg     Config
 	token   string
 	client  *http.Client
@@ -137,15 +140,42 @@ func New(cfg Config, log *slog.Logger) (*Bot, error) {
 	if token == "" {
 		return nil, errors.New("empty telegram token")
 	}
+	cfg.Traffic.Defaults(cfg.UsersFile)
+	collector, err := traffic.New(cfg.Traffic)
+	if err != nil {
+		return nil, fmt.Errorf("load traffic history: %w", err)
+	}
 	masters := map[int64]struct{}{}
 	for _, id := range cfg.Masters {
 		masters[id] = struct{}{}
 	}
-	return &Bot{cfg: cfg, token: token, client: &http.Client{Timeout: 70 * time.Second}, log: log, masters: masters, pending: make(map[int64]pendingAction)}, nil
+	return &Bot{traffic: collector, cfg: cfg, token: token, client: &http.Client{Timeout: 70 * time.Second}, log: log, masters: masters, pending: make(map[int64]pendingAction)}, nil
 }
 
 func (b *Bot) Run(ctx context.Context) error {
 	var offset int64
+	if b.traffic != nil {
+		pollCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			poll := func() {
+				if err := b.traffic.Poll(pollCtx, time.Now().UTC()); err != nil && pollCtx.Err() == nil {
+					b.log.Warn("traffic collection failed", "error", err)
+				}
+			}
+			poll()
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-pollCtx.Done():
+					return
+				case <-ticker.C:
+					poll()
+				}
+			}
+		}()
+	}
 	b.log.Info("telegram bot started")
 	for {
 		if err := ctx.Err(); err != nil {
@@ -260,8 +290,10 @@ func (b *Bot) handleMessage(ctx context.Context, m Message) {
 func (b *Bot) handleUser(ctx context.Context, m Message, u model.User, cmd string, args []string) {
 	switch cmd {
 	case "/start", "/help", "/menu":
-		_ = b.sendMessage(ctx, m.Chat.ID, "👋 Proxy VPN\n\n/links — все ссылки и QR\n/android — Android\n/ios — iPhone / iPad\n/macos — macOS\n/linux — Linux\n/tv — Android TV / IPTV\n/openwrt — роутер OpenWRT\n/universal — универсальный профиль\n/status — статус профиля\n/rotate — новые VPN-секреты\n/rotate_token CONFIRM — новый subscription token")
+		_ = b.sendMessage(ctx, m.Chat.ID, "👋 Proxy VPN\n\n/links — все ссылки и QR\n/android — Android\n/ios — iPhone / iPad\n/macos — macOS\n/linux — Linux\n/tv — Android TV / IPTV\n/openwrt — роутер OpenWRT\n/universal — универсальный профиль\n/traffic — мой трафик\n/status — статус профиля\n/rotate — новые VPN-секреты\n/rotate_token CONFIRM — новый subscription token")
 		b.sendMenu(ctx, m.Chat.ID, false)
+	case "/traffic":
+		b.sendTraffic(ctx, m.Chat.ID, u.Name)
 	case "/platforms":
 		b.sendPlatformMenu(ctx, m.Chat.ID, u.Name)
 	case "/links", "/alllinks":
@@ -310,8 +342,23 @@ func (b *Bot) handleUser(ctx context.Context, m Message, u model.User, cmd strin
 
 func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []string) {
 	switch cmd {
+	case "/traffic":
+		if len(args) > 1 {
+			_ = b.sendMessage(ctx, m.Chat.ID, "Используй /traffic или /traffic NAME")
+			return
+		}
+		if len(args) == 1 {
+			if _, err := users.FindByNameFile(b.cfg.UsersFile, args[0]); err != nil {
+				_ = b.sendMessage(ctx, m.Chat.ID, "Профиль не найден.")
+				return
+			}
+			b.sendTraffic(ctx, m.Chat.ID, args[0])
+		} else {
+			b.sendTrafficOverview(ctx, m.Chat.ID)
+		}
+
 	case "/start", "/help", "/menu":
-		_ = b.sendMessage(ctx, m.Chat.ID, "👑 Proxy VPN master\n\n/users\n/add NAME\n/delete NAME CONFIRM\n/enable NAME\n/disable NAME\n/rotate NAME\n/rotate_token NAME CONFIRM\n/invite NAME\n/unbind NAME\n/links NAME\n/status\n/selftest\n/xray\n/hysteria\n\nДля управления нажимай кнопки ниже.")
+		_ = b.sendMessage(ctx, m.Chat.ID, "👑 Proxy VPN master\n\n/users\n/add NAME\n/delete NAME CONFIRM\n/enable NAME\n/disable NAME\n/rotate NAME\n/rotate_token NAME CONFIRM\n/invite NAME\n/unbind NAME\n/links NAME\n/traffic [NAME] — трафик\n/status\n/selftest\n/xray\n/hysteria\n\nДля управления нажимай кнопки ниже.")
 		b.sendMenu(ctx, m.Chat.ID, true)
 	case "/users":
 		if len(args) == 0 {

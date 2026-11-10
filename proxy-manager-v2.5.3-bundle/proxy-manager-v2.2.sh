@@ -844,6 +844,9 @@ write_xray() {
     --arg sid "$SERVER_SHORT_ID" \
     '{
       log:{loglevel:"warning"},
+      api:{tag:"api",listen:"127.0.0.1:10085",services:["StatsService"]},
+      stats:{},
+      policy:{levels:{"0":{statsUserUplink:true,statsUserDownlink:true}}},
       inbounds:[{
         listen:"0.0.0.0",
         port:$port,
@@ -907,6 +910,9 @@ write_hysteria() {
     # Keep one private sentinel so an empty/fully-disabled account set remains a valid map.
     printf '    __sentinel__: %s\n' "$SENTINEL_HY_PASS"
     jq -r '.accounts[] | select(.enabled == true) | "    " + .name + ": " + .hysteria_password' "$STATE_FILE"
+    echo
+    echo "trafficStats:"
+    echo "  listen: 127.0.0.1:10086"
     echo
     echo "masquerade:"
     echo "  type: file"

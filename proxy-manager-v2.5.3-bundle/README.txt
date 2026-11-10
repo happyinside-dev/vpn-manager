@@ -47,3 +47,6 @@ v2.4.5: use `sudo proxy-manager xray matrix` to find a locally compatible Xray r
 
 
 v2.4.6: Android/TV profiles no longer depend on remote rule-set downloads at first start. Yandex/VK/government routing rules are embedded inline; .ru/.su/.рф and Android package rules remain direct. This makes a freshly installed sing-box client bootstrap without pre-cached .srs assets.
+
+Traffic statistics in Telegram: see TRAFFIC.md (commands, persistent history,
+API setup, and upgrade-traffic.sh for existing installations).
