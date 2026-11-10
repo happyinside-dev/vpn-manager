@@ -38,7 +38,7 @@ func TestTrafficAccessAndCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	transport := &captureTransport{}
-	b := &Bot{cfg: Config{UsersFile: usersPath}, traffic: collector, client: &http.Client{Transport: transport}, log: slog.New(slog.NewTextHandler(io.Discard, nil)), masters: map[int64]struct{}{99: {}}}
+	b := &Bot{navigation: map[int64]bool{42: false, 99: true}, cfg: Config{UsersFile: usersPath}, traffic: collector, client: &http.Client{Transport: transport}, log: slog.New(slog.NewTextHandler(io.Discard, nil)), masters: map[int64]struct{}{99: {}}}
 	callback := func(id, chat int64, data string) {
 		b.handleCallback(context.Background(), CallbackQuery{ID: "test", From: User{ID: id}, Message: &Message{Chat: Chat{ID: chat}}, Data: data})
 	}
@@ -74,4 +74,67 @@ func TestTrafficAccessAndCommands(t *testing.T) {
 	if len(transport.messages) != 1 || strings.Contains(transport.messages[0].Get("text"), "bob") {
 		t.Fatal("command bypassed ownership")
 	}
+	// A direct command after an upgrade must install the bottom keyboard too.
+	transport.messages = nil
+	b.navigation = nil
+	b.handleMessage(context.Background(), Message{From: User{ID: 99}, Chat: Chat{ID: 99}, Text: "👥 Пользователи"})
+	if len(transport.messages) != 2 {
+		t.Fatal("persistent navigation and user picker expected")
+	}
+	var keyboard struct {
+		Persistent bool                  `json:"is_persistent"`
+		OneTime    bool                  `json:"one_time_keyboard"`
+		Rows       [][]map[string]string `json:"keyboard"`
+	}
+	if err := json.Unmarshal([]byte(transport.messages[0].Get("reply_markup")), &keyboard); err != nil {
+		t.Fatal(err)
+	}
+	if !keyboard.Persistent || keyboard.OneTime || len(keyboard.Rows) == 0 {
+		t.Fatal("bottom navigation must stay visible")
+	}
+	if !strings.Contains(transport.messages[1].Get("reply_markup"), "user:alice") {
+		t.Fatal("user picker missing")
+	}
+	transport.messages = nil
+	callback(99, 99, "user:alice")
+	if len(transport.messages) != 1 || !strings.Contains(transport.messages[0].Get("reply_markup"), "📊 Статистика") {
+		t.Fatal("statistics button missing from user card")
+	}
+	transport.messages = nil
+	callback(99, 99, "traffic:alice")
+	if len(transport.messages) != 1 {
+		t.Fatal("navigation resent on every action")
+	}
+	markup := transport.messages[0].Get("reply_markup")
+	for _, target := range []string{"traffic:alice", "user:alice", "users", "menu"} {
+		if !strings.Contains(markup, `"callback_data":"`+target+`"`) {
+			t.Fatalf("missing statistics navigation: %s", target)
+		}
+	}
+	transport.messages = nil
+	callback(99, 99, "user:alice")
+	callback(99, 99, "users")
+	callback(99, 99, "menu")
+	if len(transport.messages) != 3 || !strings.Contains(transport.messages[2].Get("reply_markup"), `"is_persistent":true`) {
+		t.Fatal("back and home flow broken")
+	}
+	b.pending = map[int64]pendingAction{99: {Kind: "add", Until: time.Now().Add(time.Minute)}}
+	transport.messages = nil
+	b.handleMessage(context.Background(), Message{From: User{ID: 99}, Chat: Chat{ID: 99}, Text: "👥 Пользователи"})
+	if _, ok := b.pending[99]; ok {
+		t.Fatal("navigation did not cancel pending text input")
+	}
+	if len(transport.messages) != 1 || !strings.Contains(transport.messages[0].Get("reply_markup"), "user:alice") {
+		t.Fatal("navigation was treated as a profile name")
+	}
+	transport.messages = nil
+	b.navigation = nil
+	callback(42, 42, "traffic:alice")
+	if len(transport.messages) != 2 {
+		t.Fatal("user bottom navigation not installed")
+	}
+	if strings.Contains(transport.messages[0].Get("reply_markup"), "👥 Пользователи") || strings.Contains(transport.messages[1].Get("reply_markup"), `"callback_data":"users"`) {
+		t.Fatal("admin navigation exposed to regular user")
+	}
+
 }

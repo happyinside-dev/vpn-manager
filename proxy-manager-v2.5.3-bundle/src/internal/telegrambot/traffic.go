@@ -45,8 +45,15 @@ func (b *Bot) sendTraffic(ctx context.Context, chatID int64, name string) {
 		return
 	}
 	r := b.traffic.Report(name, time.Now().UTC())
-	text := fmt.Sprintf("📊 Трафик · %s\n\nЗа всё время: %s\nЗа последние 7 дней: %s\n%s", name, formatBytes(r.Total), formatBytes(r.Week), trafficNote(r))
-	b.sendInline(ctx, chatID, text, [][]uiButton{{{Text: "🔄 Обновить", Callback: "traffic:" + name}}})
+	text := fmt.Sprintf("📊 Статистика · %s\n\nЗа всё время: %s\nЗа последние 7 дней: %s\n%s", name, formatBytes(r.Total), formatBytes(r.Week), trafficNote(r))
+	rows := [][]uiButton{{{Text: "🔄 Обновить", Callback: "traffic:" + name}}}
+	if b.isMaster(chatID) {
+		rows = append(rows, []uiButton{{Text: "⬅️ К пользователю", Callback: "user:" + name}}, []uiButton{{Text: "👥 Другой пользователь", Callback: "users"}})
+	} else {
+		rows = append(rows, []uiButton{{Text: "🔗 Мои ссылки", Callback: "links:" + name}})
+	}
+	rows = append(rows, []uiButton{{Text: "🏠 Главное меню", Callback: "menu"}})
+	b.sendInline(ctx, chatID, text, rows)
 }
 
 func (b *Bot) sendTrafficOverview(ctx context.Context, chatID int64) {

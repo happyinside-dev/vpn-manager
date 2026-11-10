@@ -37,7 +37,7 @@ func looksLikeInvite(s string) bool {
 }
 func masterShortcut(s string) string {
 	switch strings.TrimSpace(s) {
-	case "📊 Трафик":
+	case "📊 Статистика", "📊 Трафик":
 		return "/traffic"
 	case "👥 Пользователи":
 		return "/users"
@@ -54,7 +54,7 @@ func masterShortcut(s string) string {
 }
 func userShortcut(s string) string {
 	switch strings.TrimSpace(s) {
-	case "📊 Мой трафик":
+	case "📊 Моя статистика", "📊 Мой трафик":
 		return "/traffic"
 	case "🔗 Мои ссылки":
 		return "/platforms"
@@ -100,17 +100,36 @@ func (b *Bot) sendMenu(ctx context.Context, chatID int64, master bool) {
 		rows = [][]map[string]string{
 			{{"text": "👥 Пользователи"}, {"text": "➕ Создать профиль"}},
 			{{"text": "🖥 Сервер"}, {"text": "🧪 Self-test"}},
-			{{"text": "📊 Трафик"}, {"text": "🏠 Меню"}},
+			{{"text": "📊 Статистика"}, {"text": "🏠 Меню"}},
 		}
 	} else {
 		rows = [][]map[string]string{
 			{{"text": "🔗 Мои ссылки"}, {"text": "ℹ️ Статус"}},
-			{{"text": "📊 Мой трафик"}},
+			{{"text": "📊 Моя статистика"}},
 			{{"text": "🔄 Новые секреты"}, {"text": "🏠 Меню"}},
 		}
 	}
-	_ = b.postUI(ctx, chatID, "Выбери действие 👇", map[string]any{"keyboard": rows, "resize_keyboard": true, "is_persistent": true}, "")
+	if err := b.postUI(ctx, chatID, "Выбери действие 👇", map[string]any{"keyboard": rows, "resize_keyboard": true, "is_persistent": true, "one_time_keyboard": false}, ""); err == nil {
+		b.mu.Lock()
+		if b.navigation == nil {
+			b.navigation = make(map[int64]bool)
+		}
+		b.navigation[chatID] = master
+		b.mu.Unlock()
+	}
 }
+
+// Install the persistent keyboard on the first authorized interaction, including
+// commands and buttons left in the chat before the bot was upgraded.
+func (b *Bot) ensureNavigation(ctx context.Context, chatID int64, master bool) {
+	b.mu.Lock()
+	role, ready := b.navigation[chatID]
+	b.mu.Unlock()
+	if !ready || role != master {
+		b.sendMenu(ctx, chatID, master)
+	}
+}
+
 func (b *Bot) sendInline(ctx context.Context, chatID int64, text string, rows [][]uiButton) {
 	if err := b.postUI(ctx, chatID, text, inlineKeyboard{Rows: rows}, ""); err != nil {
 		b.log.Warn("telegram inline keyboard failed", "error", err.Error())
@@ -130,7 +149,7 @@ func (b *Bot) sendUsersMenu(ctx context.Context, chatID int64) {
 		}
 		rows = append(rows, []uiButton{{Text: st + " " + u.Name, Callback: "user:" + u.Name}})
 	}
-	rows = append(rows, []uiButton{{Text: "➕ Создать", Callback: "add"}})
+	rows = append(rows, []uiButton{{Text: "➕ Создать", Callback: "add"}}, []uiButton{{Text: "🏠 Главное меню", Callback: "menu"}})
 	b.sendInline(ctx, chatID, "👥 Пользователи — выбери профиль:", rows)
 }
 func (b *Bot) sendUserCard(ctx context.Context, chatID int64, name string) {
@@ -153,7 +172,7 @@ func (b *Bot) sendUserCard(ctx context.Context, chatID int64, name string) {
 	}
 	b.sendInline(ctx, chatID, fmt.Sprintf("👤 %s\n%s\nTelegram привязан: %s", name, state, linked), [][]uiButton{
 		{{Text: "🔗 Ссылки", Callback: "links:" + name}, {Text: "🔑 Новый код", Callback: "invite:" + name}},
-		{{Text: "📊 Трафик", Callback: "traffic:" + name}},
+		{{Text: "📊 Статистика", Callback: "traffic:" + name}},
 		{{Text: "🔄 Сменить секреты", Callback: "confirm-rotate:" + name}},
 		{{Text: toggle, Callback: act + ":" + name}, {Text: "🗑 Удалить", Callback: "confirm-delete:" + name}},
 		{{Text: "🔓 Отвязать Telegram", Callback: "confirm-unbind:" + name}},
@@ -197,7 +216,11 @@ func (b *Bot) handlePending(ctx context.Context, m Message) bool {
 		_ = b.sendMessage(ctx, m.Chat.ID, "Отменено.")
 		return true
 	}
-	if strings.HasPrefix(m.Text, "/") {
+	// Navigation cancels text entry so a menu button cannot become an account name.
+	if strings.HasPrefix(m.Text, "/") || masterShortcut(m.Text) != "" || userShortcut(m.Text) != "" {
+		b.mu.Lock()
+		delete(b.pending, m.Chat.ID)
+		b.mu.Unlock()
 		return false
 	}
 	b.mu.Lock()
@@ -249,11 +272,25 @@ func (b *Bot) handleCallback(ctx context.Context, c CallbackQuery) {
 		_ = b.sendMessage(ctx, chat, "Отменено.")
 		return
 	}
+	if action == "menu" {
+		if !master {
+			if _, err := users.FindByTelegramIDFile(b.cfg.UsersFile, c.From.ID); err != nil {
+				return
+			}
+		}
+		b.mu.Lock()
+		delete(b.pending, chat)
+		b.mu.Unlock()
+		b.sendMenu(ctx, chat, master)
+		return
+	}
 	if action == "users" && master {
+		b.ensureNavigation(ctx, chat, true)
 		b.sendUsersMenu(ctx, chat)
 		return
 	}
 	if action == "add" && master {
+		b.ensureNavigation(ctx, chat, true)
 		b.startPrompt(ctx, chat, "add", "", "Введи имя нового профиля:")
 		return
 	}
@@ -268,6 +305,7 @@ func (b *Bot) handleCallback(ctx context.Context, c CallbackQuery) {
 	if !master && u.TelegramID != c.From.ID {
 		return
 	}
+	b.ensureNavigation(ctx, chat, master)
 	switch action {
 	case "traffic":
 		b.sendTraffic(ctx, chat, account)

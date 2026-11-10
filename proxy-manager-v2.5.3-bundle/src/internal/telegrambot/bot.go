@@ -41,14 +41,15 @@ type Config struct {
 }
 
 type Bot struct {
-	traffic *traffic.Collector
-	cfg     Config
-	token   string
-	client  *http.Client
-	log     *slog.Logger
-	masters map[int64]struct{}
-	mu      sync.Mutex
-	pending map[int64]pendingAction
+	traffic    *traffic.Collector
+	cfg        Config
+	token      string
+	client     *http.Client
+	log        *slog.Logger
+	masters    map[int64]struct{}
+	mu         sync.Mutex
+	pending    map[int64]pendingAction
+	navigation map[int64]bool
 }
 
 type updateResponse struct {
@@ -288,6 +289,9 @@ func (b *Bot) handleMessage(ctx context.Context, m Message) {
 }
 
 func (b *Bot) handleUser(ctx context.Context, m Message, u model.User, cmd string, args []string) {
+	if cmd != "/start" && cmd != "/help" && cmd != "/menu" {
+		b.ensureNavigation(ctx, m.Chat.ID, b.isMaster(m.From.ID))
+	}
 	switch cmd {
 	case "/start", "/help", "/menu":
 		_ = b.sendMessage(ctx, m.Chat.ID, "👋 Proxy VPN\n\n/links — все ссылки и QR\n/android — Android\n/ios — iPhone / iPad\n/macos — macOS\n/linux — Linux\n/tv — Android TV / IPTV\n/openwrt — роутер OpenWRT\n/universal — универсальный профиль\n/traffic — мой трафик\n/status — статус профиля\n/rotate — новые VPN-секреты\n/rotate_token CONFIRM — новый subscription token")
@@ -341,6 +345,9 @@ func (b *Bot) handleUser(ctx context.Context, m Message, u model.User, cmd strin
 }
 
 func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []string) {
+	if cmd != "/start" && cmd != "/help" && cmd != "/menu" {
+		b.ensureNavigation(ctx, m.Chat.ID, b.isMaster(m.From.ID))
+	}
 	switch cmd {
 	case "/traffic":
 		if len(args) > 1 {

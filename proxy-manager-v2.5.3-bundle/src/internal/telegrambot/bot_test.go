@@ -66,7 +66,7 @@ func TestRoutingCallbackFlowAndPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	transport := &captureTransport{}
-	b := &Bot{cfg: Config{UsersFile: path, BaseURL: "https://vpn.example.com", ProfileName: "VPN"}, client: &http.Client{Transport: transport}, log: slog.New(slog.NewTextHandler(io.Discard, nil)), masters: map[int64]struct{}{99: {}}}
+	b := &Bot{navigation: map[int64]bool{42: false, 99: true}, cfg: Config{UsersFile: path, BaseURL: "https://vpn.example.com", ProfileName: "VPN"}, client: &http.Client{Transport: transport}, log: slog.New(slog.NewTextHandler(io.Discard, nil)), masters: map[int64]struct{}{99: {}}}
 	callback := func(id int64, data string) {
 		b.handleCallback(context.Background(), CallbackQuery{ID: "test", From: User{ID: id}, Message: &Message{Chat: Chat{ID: id}}, Data: data})
 	}
