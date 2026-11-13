@@ -10,7 +10,11 @@ set -Eeuo pipefail
 
 SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 VPNM_SOURCE="$SELF_DIR/vpn-manager"
+[[ ! -x "$SELF_DIR/vpn-manager-live" ]] || VPNM_SOURCE="$SELF_DIR/vpn-manager-live"
 [[ -x $VPNM_SOURCE ]] || { echo "[x] Missing executable: $VPNM_SOURCE" >&2; exit 1; }
+timeout 5 "$VPNM_SOURCE" live-auth --help >/dev/null 2>&1 || {
+  echo "[x] Build the updated vpn-manager-live binary before installing." >&2; exit 1;
+}
 
 CORE_SOURCE=""
 if [[ ${1:-} == *.sh && -f ${1:-} ]]; then
@@ -283,6 +287,10 @@ EONGINX
 }
 
 main() {
+  if [[ ${1:-} == --users-only ]]; then
+    sync_users
+    return
+  fi
   command -v jq >/dev/null || die "jq is required"
   [[ -x $VPNM_BIN ]] || die "vpn-manager binary missing: $VPNM_BIN"
   ensure_identity
@@ -347,8 +355,12 @@ case "${1:-}" in
   install|-S|--preserve-secrets|"") need_sync=1 ;;
 esac
 
+# Live core synchronizes subscriptions before releasing its account lock.
+if [[ ${1:-} == account && -f /etc/proxy-manager/live-users ]]; then need_sync=0; fi
 if (( need_sync )) && [[ -x $SYNC ]]; then
-  if ! "$SYNC"; then
+  sync_args=()
+  [[ ${1:-} == account ]] && sync_args=(--users-only)
+  if ! "$SYNC" "${sync_args[@]}"; then
     echo "[!] VPN account operation succeeded, but subscription synchronization failed." >&2
     echo "    Retry with: sudo $SYNC" >&2
     exit 1
@@ -386,6 +398,7 @@ bash "$CORE_SOURCE" "$@"
 log "Installing subscription backend and persistent manager wrapper..."
 install_runtime_files
 "$SYNC_HELPER"
+"$CORE_INSTALLED" enable-live-users
 
 XRAY_SNI=$(jq -r '.server.xray_sni' "$STATE_FILE")
 log "Installation complete."

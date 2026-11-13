@@ -3,12 +3,15 @@ package telegrambot
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -137,4 +140,52 @@ func TestTrafficAccessAndCommands(t *testing.T) {
 		t.Fatal("admin navigation exposed to regular user")
 	}
 
+}
+
+// Exercise actual readers: opening the report must fetch changed daemon counters,
+// even when the periodic collector has not ticked yet.
+func TestStatisticsRefreshReadsLiveCounters(t *testing.T) {
+	dir := t.TempDir()
+	xray := filepath.Join(dir, "xray")
+	if err := os.WriteFile(xray, []byte("#!/bin/sh\nprintf '{\"stat\":[]}'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	var bytes atomic.Uint64
+	bytes.Store(100)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" {
+			t.Error("counters must not be cleared")
+		}
+		fmt.Fprintf(w, `{"alice":{"tx":%d,"rx":0}}`, bytes.Load())
+	}))
+	defer server.Close()
+	collector, err := traffic.New(traffic.Config{File: filepath.Join(dir, "traffic.json"), XrayBinary: xray, HysteriaURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = collector.Poll(context.Background(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	transport := &captureTransport{}
+	b := &Bot{traffic: collector, client: &http.Client{Transport: transport}, log: slog.New(slog.NewTextHandler(io.Discard, nil)), masters: map[int64]struct{}{99: {}}}
+	b.sendTraffic(context.Background(), 99, "alice")
+	if !strings.Contains(transport.messages[0].Get("text"), "Первый снимок") {
+		t.Fatal("initial zero needs a baseline explanation")
+	}
+	for _, value := range []uint64{200, 300, 300} {
+		bytes.Store(value)
+		transport.messages = nil
+		b.sendTraffic(context.Background(), 99, "alice")
+		if r := collector.Report("alice", time.Now()); r.Total != value-100 || r.Week != value-100 {
+			t.Fatalf("button failed to fetch live delta, or counted it twice: %+v", r)
+		}
+	}
+	// A failed API cannot be presented as a trustworthy zero.
+	server.Close()
+	transport.messages = nil
+	b.sendTraffic(context.Background(), 99, "bob")
+	text := transport.messages[0].Get("text")
+	if !strings.Contains(text, "нет полных данных") || strings.Contains(text, "С начала учёта: 0.00") {
+		t.Fatalf("API failure disguised as zero: %s", text)
+	}
 }

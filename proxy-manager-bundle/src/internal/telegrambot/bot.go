@@ -177,7 +177,7 @@ func (b *Bot) Run(ctx context.Context) error {
 			}
 		}()
 	}
-	b.log.Info("telegram bot started")
+	b.log.Info("telegram bot started", "users_file", b.cfg.UsersFile, "traffic_file", b.cfg.Traffic.File)
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
@@ -328,10 +328,6 @@ func (b *Bot) handleUser(ctx context.Context, m Message, u model.User, cmd strin
 			_ = b.sendMessage(ctx, m.Chat.ID, "❌ Не удалось сменить token.")
 			return
 		}
-		if err := restartSubscription(ctx); err != nil {
-			_ = b.sendMessage(ctx, m.Chat.ID, "❌ Token изменён в файле, но subscription backend не перезапустился. Сообщи администратору.")
-			return
-		}
 		b.audit(m.From.ID, "user", "rotate_token", u.Name, "success")
 		nu, _ := users.FindByNameFile(b.cfg.UsersFile, u.Name)
 		_ = b.sendMessage(ctx, m.Chat.ID, "✅ Subscription token заменён. Старые URL больше не работают.")
@@ -455,10 +451,6 @@ func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []st
 			_ = b.sendMessage(ctx, m.Chat.ID, "❌ "+safeErr(err))
 			return
 		}
-		if err := restartSubscription(ctx); err != nil {
-			_ = b.sendMessage(ctx, m.Chat.ID, "❌ Token изменён, но vpn-manager service не перезапустился: "+safeErr(err))
-			return
-		}
 		b.audit(m.From.ID, "master", "rotate_token", args[0], "success")
 		_ = b.sendMessage(ctx, m.Chat.ID, "✅ Subscription token заменён; старые URL инвалидированы.")
 	case "/invite":
@@ -529,12 +521,6 @@ func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []st
 		_ = b.sendMessage(ctx, m.Chat.ID, "Выбери действие в меню 👇")
 		b.sendMenu(ctx, m.Chat.ID, true)
 	}
-}
-
-func restartSubscription(ctx context.Context) error {
-	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	return exec.CommandContext(cctx, "systemctl", "restart", "vpn-manager").Run()
 }
 
 func (b *Bot) runManager(ctx context.Context, args ...string) error {

@@ -68,6 +68,7 @@ STATE_DIR=/etc/proxy-manager
 STATE_FILE=$STATE_DIR/state.json
 XRAY_VERSION_PIN=$STATE_DIR/xray-version
 MANAGER_BIN=/usr/local/sbin/proxy-manager
+VPNM_BIN=${VPNM_BIN:-/usr/local/bin/vpn-manager}
 LOG_DIR=/var/log/proxy-setup
 DEFAULT_ACCOUNT="${DEFAULT_ACCOUNT:-default}"
 
@@ -129,7 +130,8 @@ ACCOUNT MANAGEMENT:
   proxy-manager account delete NAME    Permanently delete an account
 
 CONFIGURATION / STATUS:
-  proxy-manager apply                  Regenerate configs from saved state
+  proxy-manager enable-live-users      Enable live updates (one-time VPN restart)
+  proxy-manager apply                  Regenerate server configs (restarts VPN)
   proxy-manager status                 Show services and port listeners
   proxy-manager self-test              Run protocol end-to-end tests locally
   proxy-manager xray version           Show installed/pinned Xray version
@@ -829,11 +831,14 @@ account_delete_state() {
 # ---------- proxy configuration ----------
 write_xray() {
   log "Writing Xray configuration from account state..."
-  mkdir -p "$(dirname "$XRAY_CONF")"
+  mkdir -p "$(dirname "$XRAY_CONF")" || return 1
+  local destination="$XRAY_CONF"
+  local XRAY_CONF
+  XRAY_CONF=$(mktemp "$(dirname "$destination")/.xray.XXXXXX.json") || return 1
   local clients
   clients=$(jq -c --arg sentinel "$SENTINEL_UUID" '
     ([.accounts[] | select(.enabled == true) | {id:.xray_uuid, email:.name, flow:"xtls-rprx-vision"}]
-      + [{id:$sentinel, email:"__sentinel__", flow:"xtls-rprx-vision"}])' "$STATE_FILE")
+      + [{id:$sentinel, email:"__sentinel__", flow:"xtls-rprx-vision"}])' "$STATE_FILE") || return 1
 
   jq -n \
     --argjson port "$PORT" \
@@ -844,10 +849,11 @@ write_xray() {
     --arg sid "$SERVER_SHORT_ID" \
     '{
       log:{loglevel:"warning"},
-      api:{tag:"api",listen:"127.0.0.1:10085",services:["StatsService"]},
+      api:{tag:"api",listen:"127.0.0.1:10085",services:["StatsService","HandlerService"]},
       stats:{},
       policy:{levels:{"0":{statsUserUplink:true,statsUserDownlink:true}}},
       inbounds:[{
+        tag:"vless-reality",
         listen:"0.0.0.0",
         port:$port,
         protocol:"vless",
@@ -870,19 +876,20 @@ write_xray() {
         {protocol:"freedom",tag:"direct"},
         {protocol:"blackhole",tag:"block"}
       ]
-    }' >"$XRAY_CONF"
+    }' >"$XRAY_CONF" || return 1
 
   local svc_user svc_group
   svc_user=$(systemctl show -p User --value xray 2>/dev/null || true)
   if [[ -n $svc_user && $svc_user != root ]] && id "$svc_user" >/dev/null 2>&1; then
     svc_group=$(id -gn "$svc_user")
-    chown "root:$svc_group" "$XRAY_CONF"
-    chmod 640 "$XRAY_CONF"
+    chown "root:$svc_group" "$XRAY_CONF" || return 1
+    chmod 640 "$XRAY_CONF" || return 1
   else
-    chown root:root "$XRAY_CONF"
-    chmod 600 "$XRAY_CONF"
+    chown root:root "$XRAY_CONF" || return 1
+    chmod 600 "$XRAY_CONF" || return 1
   fi
-  xray run -test -config "$XRAY_CONF" >/dev/null 2>&1 || die "Xray rejected the generated config."
+  xray run -test -config "$XRAY_CONF" >/dev/null 2>&1 || { warn "Xray rejected the generated config."; return 1; }
+  mv -f -- "$XRAY_CONF" "$destination"
 }
 
 write_hysteria() {
@@ -905,11 +912,16 @@ write_hysteria() {
     fi
     echo
     echo "auth:"
-    echo "  type: userpass"
-    echo "  userpass:"
-    # Keep one private sentinel so an empty/fully-disabled account set remains a valid map.
-    printf '    __sentinel__: %s\n' "$SENTINEL_HY_PASS"
-    jq -r '.accounts[] | select(.enabled == true) | "    " + .name + ": " + .hysteria_password' "$STATE_FILE"
+    if [[ -f $STATE_DIR/live-users ]]; then
+      echo "  type: http"
+      echo "  http:"
+      echo "    url: http://127.0.0.1:18081/auth"
+    else
+      echo "  type: userpass"
+      echo "  userpass:"
+      printf '    __sentinel__: %s\n' "$SENTINEL_HY_PASS"
+      jq -r '.accounts[] | select(.enabled == true) | "    " + .name + ": " + .hysteria_password' "$STATE_FILE"
+    fi
     echo
     echo "trafficStats:"
     echo "  listen: 127.0.0.1:10086"
@@ -1195,6 +1207,7 @@ backup_manager_state() {
 
 apply_account_state() {
   load_state
+  if [[ -f $STATE_DIR/live-users ]]; then write_auth_snapshot || return 1; fi
   write_xray
   write_hysteria
   systemctl restart xray
@@ -1203,12 +1216,153 @@ apply_account_state() {
   systemctl is-active --quiet hysteria-server || return 1
 }
 
+# ---------- live account provisioning ----------
+live_users_ready() {
+  [[ -f $STATE_DIR/live-users ]] &&
+    jq -e '.api.services | index("HandlerService") != null' "$XRAY_CONF" >/dev/null &&
+    jq -e '.inbounds[] | select(.tag == "vless-reality")' "$XRAY_CONF" >/dev/null &&
+    grep -q 'url: http://127.0.0.1:18081/auth' "$HY_CONF" &&
+    curl -fsS --max-time 3 http://127.0.0.1:18081/health >/dev/null
+}
+
+write_auth_snapshot() {
+  local tmp
+  tmp=$(mktemp "$HY_DIR/.auth-users.XXXXXX") || return 1
+  jq '([.accounts[] | select(.enabled) | {key:.name,value:.hysteria_password}] +
+       [{key:"__sentinel__",value:.server.sentinel_hy_password}]) | from_entries' "$STATE_FILE" >"$tmp" || return 1
+  chown root:vpn-manager "$tmp" || return 1
+  chmod 640 "$tmp" || return 1
+  mv "$tmp" "$HY_DIR/auth-users.json"
+}
+
+# Xray CLI may exit zero on individual RPC failures. Verify its success count.
+# Never print its output: RPC diagnostics can contain credentials.
+live_xray_remove() {
+  local result
+  result=$(xray api rmu --server=127.0.0.1:10085 -timeout=5 -tag=vless-reality "$1" 2>&1) || return 1
+  [[ $result == *'Removed 1 user(s) in total.'* ]] ||
+    [[ $result == *"User $1 not found."* && $result == *'Removed 0 user(s) in total.'* ]]
+}
+
+live_xray_add() {
+  local name=$1 result cfg="$WORK/live-add.json"
+  jq --arg n "$name" '{inbounds:[{tag:"vless-reality",port:.server.port,protocol:"vless",
+    settings:{decryption:"none",clients:[{email:$n,id:.accounts[$n].xray_uuid,flow:"xtls-rprx-vision"}]}}]}' "$STATE_FILE" >"$cfg" || return 1
+  chmod 600 "$cfg"
+  result=$(xray api adu --server=127.0.0.1:10085 -timeout=5 "$cfg" 2>&1) || return 1
+  [[ $result == *'Added 1 user(s) in total.'* ]]
+}
+
+apply_live_account() {
+  local name=$1
+  # Remove only the target account. This also makes retries/rollback idempotent.
+  live_xray_remove "$name" || return 1
+  if jq -e --arg n "$name" '.accounts[$n].enabled == true' "$STATE_FILE" >/dev/null; then
+    live_xray_add "$name" || return 1
+  fi
+  write_auth_snapshot || return 1
+  # Deny future Hysteria authentication before disconnecting existing sessions.
+  # Rotation also disconnects only this account, so old sessions cannot survive it.
+  jq -cn --arg n "$name" '[$n]' >"$WORK/kick.json"
+  curl -fsS --max-time 5 -H 'Content-Type: application/json' \
+    --data-binary @"$WORK/kick.json" http://127.0.0.1:10086/kick >/dev/null || return 1
+  # Persist the new client list for independent Xray restarts. No daemon reload.
+  write_xray || return 1
+  "$VPNM_BIN" sync-users --state "$STATE_FILE" --users-config /etc/vpn-manager/users.yaml >/dev/null
+}
+
+# One-time, explicit migration. Existing secrets and subscriptions are preserved.
+enable_live_users() {
+  if live_users_ready; then
+    log "Live provisioning is already enabled."
+    return
+  fi
+  [[ -x $VPNM_BIN ]] || die "Install the subscription backend first."
+  timeout 5 "$VPNM_BIN" live-auth --help >/dev/null 2>&1 || die "Update vpn-manager binary first."
+  local backup was_live=0
+  [[ ! -f $STATE_DIR/live-users ]] || was_live=1
+  backup=$(backup_manager_state)
+  install -d -m 755 -o root -g root "$HY_DIR"
+  write_auth_snapshot
+  cat >/etc/systemd/system/proxy-manager-auth.service <<'EOAUTH'
+[Unit]
+Description=Local Hysteria account authentication
+After=network.target
+Before=hysteria-server.service
+[Service]
+User=vpn-manager
+Group=vpn-manager
+ExecStart=/usr/local/bin/vpn-manager live-auth
+Restart=on-failure
+RestartSec=1
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+[Install]
+WantedBy=multi-user.target
+EOAUTH
+  cat >/etc/systemd/system/proxy-manager-recover.service <<'EORECOVER'
+[Unit]
+Description=Recover interrupted VPN account update
+After=xray.service proxy-manager-auth.service hysteria-server.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/proxy-manager-core recover-live-users
+EORECOVER
+  cat >/etc/systemd/system/proxy-manager-recover.timer <<'EOTIMER'
+[Unit]
+Description=Retry interrupted VPN account updates
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+[Install]
+WantedBy=timers.target
+EOTIMER
+  systemctl daemon-reload
+  systemctl enable --now proxy-manager-recover.timer
+  systemctl enable --now proxy-manager-auth
+  curl --retry 10 --retry-connrefused --retry-delay 1 -fsS --max-time 3 http://127.0.0.1:18081/health >/dev/null
+  systemctl is-active --quiet proxy-manager-auth
+  touch "$STATE_DIR/live-users"
+  if ! (write_xray && write_hysteria && systemctl restart xray hysteria-server &&
+        systemctl is-active --quiet xray && systemctl is-active --quiet hysteria-server); then
+    if (( ! was_live )); then rm -f "$STATE_DIR/live-users"; fi
+    cp -a "$backup/xray-config.json" "$XRAY_CONF"
+    cp -a "$backup/hysteria-config.yaml" "$HY_CONF"
+    systemctl restart xray hysteria-server || true
+    die "Migration failed; previous daemon configs restored. Backup: $backup"
+  fi
+  log "Live account updates enabled. Backup: $backup"
+}
+
+recover_live_users() {
+  [[ -s $STATE_DIR/pending-user ]] || return 0
+  local pending
+  pending=$(cat "$STATE_DIR/pending-user")
+  valid_account_name "$pending" || return 1
+  live_users_ready || return 1
+  apply_live_account "$pending" || return 1
+  rm -f "$STATE_DIR/pending-user"
+}
+
 transactional_account_change() {
   local op=$1 name=$2 previous backup_dir
+  live_users_ready || die "Live provisioning is not configured or auth is unavailable. Run upgrade-live-users.sh from the updated bundle first."
+  recover_live_users || die "Previous account change still needs recovery; retry after restoring daemon health."
   previous="$WORK/state-before.json"
   cp -a "$STATE_FILE" "$previous"
   backup_dir=$(backup_manager_state)
 
+  valid_account_name "$name" || die "Invalid account name."
+  if [[ $op == add ]]; then
+    ! account_exists "$name" || die "Account already exists."
+  else
+    account_exists "$name" || die "Account not found."
+  fi
+  printf '%s\n' "$name" >"$STATE_DIR/pending-user.tmp"
+  chmod 600 "$STATE_DIR/pending-user.tmp"
+  mv "$STATE_DIR/pending-user.tmp" "$STATE_DIR/pending-user"
   case "$op" in
     add) account_add_state "$name" ;;
     enable) account_set_enabled_state "$name" true ;;
@@ -1218,14 +1372,17 @@ transactional_account_change() {
     *) die "Unknown account operation: $op" ;;
   esac
 
-  if ! (apply_account_state); then
+  if ! (apply_live_account "$name"); then
     warn "Applying the new account state failed. Rolling back."
-    cp -a "$previous" "$STATE_FILE"
-    if ! (apply_account_state); then
+    cp -a "$previous" "$STATE_FILE.tmp"
+    mv -f -- "$STATE_FILE.tmp" "$STATE_FILE"
+    if ! (apply_live_account "$name"); then
       die "Rollback also failed. Backup: $backup_dir"
     fi
+    rm -f "$STATE_DIR/pending-user"
     die "Account change was rolled back. Backup: $backup_dir"
   fi
+  rm -f "$STATE_DIR/pending-user"
   log "Account operation '$op' applied. Backup: $backup_dir"
 }
 
@@ -1362,6 +1519,12 @@ manager_main() {
         *) manager_usage; exit 2 ;;
       esac
       ;;
+    recover-live-users)
+      recover_live_users
+      ;;
+    enable-live-users)
+      enable_live_users
+      ;;
     apply)
       apply_account_state
       log "Configuration regenerated and services restarted."
@@ -1392,10 +1555,16 @@ install_manager_binary() {
 
 # ---------- main ----------
 [[ $EUID -eq 0 ]] || die "Run this script as root (sudo -i)."
+# An idle recovery timer must not create thousands of empty log files.
+if [[ ${1:-} == recover-live-users && ! -s $STATE_DIR/pending-user ]]; then exit 0; fi
 setup_run_log
+# One stable lock covers install, migration, recovery, CLI and Telegram mutations.
+ensure_state_dir
+exec 9>"$STATE_DIR/accounts.lock"
+flock -x 9
 
 # Management commands do not participate in install flag parsing.
-if [[ ${1:-} == account || ${1:-} == apply || ${1:-} == status || ${1:-} == self-test || ${1:-} == xray ]]; then
+if [[ ${1:-} == recover-live-users || ${1:-} == enable-live-users || ${1:-} == account || ${1:-} == apply || ${1:-} == status || ${1:-} == self-test || ${1:-} == xray ]]; then
   manager_main "$@"
   exit 0
 fi
@@ -1477,6 +1646,7 @@ else
   load_state
 fi
 
+if [[ -f $STATE_DIR/live-users ]]; then write_auth_snapshot; fi
 write_xray
 write_hysteria
 start_services

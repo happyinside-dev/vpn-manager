@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -166,6 +167,11 @@ type proxyState struct {
 // accounts are removed. This function is intended to run as root from the
 // installer/account-manager integration.
 func SyncFromProxyState(usersPath, statePath string) error {
+	unlock, err := lockUsers(usersPath)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	stateBytes, err := os.ReadFile(statePath)
 	if err != nil {
 		return fmt.Errorf("read proxy state: %w", err)
@@ -288,13 +294,18 @@ func writeUsersYAMLAtomic(path string, users []model.User) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close users config: %w", err)
 	}
+	if oldUID >= 0 && oldGID >= 0 {
+		if err := os.Chown(tmpName, oldUID, oldGID); err != nil {
+			return err
+		}
+	}
+	if err := os.Chmod(tmpName, oldMode); err != nil {
+		return err
+	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("replace users config: %w", err)
 	}
-	if oldUID >= 0 && oldGID >= 0 {
-		_ = os.Chown(path, oldUID, oldGID)
-	}
-	return os.Chmod(path, oldMode)
+	return nil
 }
 
 // FindByNameFile returns a user from the root-only YAML config for administrative CLI use.
@@ -342,6 +353,11 @@ func FindByTelegramIDFile(path string, id int64) (*model.User, error) {
 
 // SetTelegramIDFile binds or unbinds a Telegram numeric user id.
 func SetTelegramIDFile(path, name string, id int64) error {
+	unlock, err := lockUsers(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	all, err := ListFile(path)
 	if err != nil {
 		return err
@@ -364,6 +380,11 @@ func SetTelegramIDFile(path, name string, id int64) error {
 
 // RotateTokenFile replaces only a subscription bearer token. VPN protocol credentials are untouched.
 func RotateTokenFile(path, name string) (string, error) {
+	unlock, err := lockUsers(path)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	all, err := ListFile(path)
 	if err != nil {
 		return "", err
@@ -388,4 +409,38 @@ func RotateTokenFile(path, name string) (string, error) {
 		return "", err
 	}
 	return token, nil
+}
+
+// FileStore observes atomic config replacements without restarting the server.
+// Invalid or unreadable updates fail closed instead of serving stale credentials.
+type FileStore struct{ path string }
+
+func NewFileStore(path string) (*FileStore, error) {
+	if _, err := NewYAMLStore(path); err != nil {
+		return nil, err
+	}
+	return &FileStore{path: path}, nil
+}
+func (s *FileStore) FindByToken(ctx context.Context, token string) (*model.User, error) {
+	current, err := NewYAMLStore(s.path)
+	if err != nil {
+		return nil, err
+	}
+	return current.FindByToken(ctx, token)
+}
+
+// Lock the stable sidecar, never the replaced inode. Every writer shares it.
+func lockUsers(path string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close() }, nil
 }

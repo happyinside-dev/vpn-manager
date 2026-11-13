@@ -2,9 +2,11 @@ package users
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -205,5 +207,74 @@ func TestSyncPreservesTelegramBinding(t *testing.T) {
 	}
 	if st.Mode().Perm() != 0o640 {
 		t.Fatalf("mode changed: got %04o want 0640", st.Mode().Perm())
+	}
+}
+
+func TestFileStoreSeesCredentialAndTokenChanges(t *testing.T) {
+	token := "abcdefghijklmnopqrstuvwxyz123456"
+	path := writeUsers(t, "users:\n  - name: alice\n    token: "+token+"\n    vless_uuid: old\n    hysteria_password: old\n")
+	store, err := NewFileStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := RotateTokenFile(path, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.FindByToken(context.Background(), token); err != ErrNotFound {
+		t.Fatalf("old token: %v", err)
+	}
+	if _, err = store.FindByToken(context.Background(), rotated); err != nil {
+		t.Fatalf("new token: %v", err)
+	}
+	state := filepath.Join(t.TempDir(), "state.json")
+	if err = os.WriteFile(state, []byte(`{"accounts":{"alice":{"name":"alice","enabled":true,"xray_uuid":"new","hysteria_password":"new"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = SyncFromProxyState(path, state); err != nil {
+		t.Fatal(err)
+	}
+	u, err := store.FindByToken(context.Background(), rotated)
+	if err != nil || u.VLESSUUID != "new" || u.HysteriaPassword != "new" {
+		t.Fatalf("credentials: %+v %v", u, err)
+	}
+	if err = os.WriteFile(state, []byte(`{"accounts":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = SyncFromProxyState(path, state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.FindByToken(context.Background(), rotated); err != ErrNotFound {
+		t.Fatalf("deleted user: %v", err)
+	}
+}
+
+func TestConcurrentCredentialAndTelegramWrites(t *testing.T) {
+	var body strings.Builder
+	body.WriteString("users:\n")
+	for i := 0; i < 16; i++ {
+		fmt.Fprintf(&body, "  - name: user%d\n    token: %064d\n", i, i+1)
+	}
+	path := writeUsers(t, body.String())
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for i := 0; i < 16; i++ {
+		name := fmt.Sprintf("user%d", i)
+		wg.Add(2)
+		go func() { defer wg.Done(); errs <- SetTelegramIDFile(path, name, int64(i+1)) }()
+		go func() { defer wg.Done(); _, err := RotateTokenFile(path, name); errs <- err }()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 16; i++ {
+		u, err := FindByNameFile(path, fmt.Sprintf("user%d", i))
+		if err != nil || u.TelegramID != int64(i+1) || u.Token == fmt.Sprintf("%064d", i+1) {
+			t.Fatalf("lost concurrent update: %+v %v", u, err)
+		}
 	}
 }

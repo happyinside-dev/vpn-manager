@@ -26,7 +26,7 @@ func trafficNote(r traffic.Report) string {
 	if r.Since.IsZero() {
 		s.WriteString("\nСбор ещё не начался.")
 	} else {
-		fmt.Fprintf(&s, "\nУчёт с %s UTC. Сумма отправленного и полученного трафика Xray + Hysteria. Обновление раз в минуту.", r.Since.UTC().Format("02.01.2006 15:04"))
+		fmt.Fprintf(&s, "\nУчёт с %s UTC. Сумма отправленного и полученного трафика Xray + Hysteria. Фоновое обновление раз в минуту; кнопка «Обновить» запрашивает свежие данные.", r.Since.UTC().Format("02.01.2006 15:04"))
 	}
 	for _, name := range []string{"Xray", "Hysteria"} {
 		if updated := r.Updated[name]; !updated.IsZero() {
@@ -39,13 +39,38 @@ func trafficNote(r traffic.Report) string {
 	return s.String()
 }
 
+func (b *Bot) refreshTraffic(ctx context.Context) {
+	if err := b.traffic.Poll(ctx, time.Now().UTC()); err != nil {
+		b.log.Warn("traffic refresh failed", "error", err)
+	}
+}
+
+func trafficValues(r traffic.Report) (string, string) {
+	total, week := formatBytes(r.Total), formatBytes(r.Week)
+	if len(r.Unavailable) > 0 {
+		if r.Total == 0 {
+			total = "нет полных данных"
+		}
+		if r.Week == 0 {
+			week = "нет полных данных"
+		}
+	}
+	return total, week
+}
+
 func (b *Bot) sendTraffic(ctx context.Context, chatID int64, name string) {
 	if b.traffic == nil {
 		_ = b.sendMessage(ctx, chatID, "Сбор трафика не настроен.")
 		return
 	}
+	b.refreshTraffic(ctx)
 	r := b.traffic.Report(name, time.Now().UTC())
-	text := fmt.Sprintf("📊 Статистика · %s\n\nЗа всё время: %s\nЗа последние 7 дней: %s\n%s", name, formatBytes(r.Total), formatBytes(r.Week), trafficNote(r))
+	b.log.Info("telegram traffic report", "account", name, "total_bytes", r.Total, "week_bytes", r.Week, "history_file", b.cfg.Traffic.File)
+	total, week := trafficValues(r)
+	text := fmt.Sprintf("📊 Статистика · %s\n\nС начала учёта: %s\nЗа последние 7 дней: %s\n%s", name, total, week, trafficNote(r))
+	if r.Total == 0 && len(r.Unavailable) == 0 {
+		text += "\nПосле начала учёта прирост трафика этого профиля ещё не зафиксирован. Первый снимок — начальная точка, его байты в историю не входят."
+	}
 	rows := [][]uiButton{{{Text: "🔄 Обновить", Callback: "traffic:" + name}}}
 	if b.isMaster(chatID) {
 		rows = append(rows, []uiButton{{Text: "⬅️ К пользователю", Callback: "user:" + name}}, []uiButton{{Text: "👥 Другой пользователь", Callback: "users"}})
@@ -66,12 +91,14 @@ func (b *Bot) sendTrafficOverview(ctx context.Context, chatID int64) {
 		_ = b.sendMessage(ctx, chatID, "Сбор трафика не настроен.")
 		return
 	}
+	b.refreshTraffic(ctx)
 	now := time.Now().UTC()
-	header := "📊 Трафик пользователей\nЗа всё время / последние 7 дней\n\n"
+	header := "📊 Трафик пользователей\nС начала учёта / последние 7 дней\n\n"
 	text := header
 	for _, u := range all {
 		r := b.traffic.Report(u.Name, now)
-		line := fmt.Sprintf("👤 %s: %s / %s\n", u.Name, formatBytes(r.Total), formatBytes(r.Week))
+		total, week := trafficValues(r)
+		line := fmt.Sprintf("👤 %s: %s / %s\n", u.Name, total, week)
 		if len([]rune(text+line)) > 3500 {
 			_ = b.sendMessage(ctx, chatID, text)
 			text = header
