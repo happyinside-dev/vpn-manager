@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+# Update using the bundled Linux amd64 binary; Go is not needed on the server.
+# Usage: sudo bash ./upgrade-telegram-only.sh
 # Surgical upgrade of Telegram UI and subscription-sync, no Xray/Hysteria reinstall.
 [[ $EUID -eq 0 ]] || { echo "Run via sudo" >&2; exit 1; }
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -9,6 +11,11 @@ BIN=/usr/local/bin/vpn-manager
 SYNC=/usr/local/libexec/proxy-manager-subscription-sync
 INSTALLER="$ROOT/install-with-subscriptions.sh"
 [[ -x "$SOURCE_BIN" && -f "$INSTALLER" && -x "$SYNC" ]] || { echo "Missing bundle binary or existing subscription-sync" >&2; exit 1; }
+# Check binary compatibility before changing any installed files.
+if ! "$SOURCE_BIN" telegram-bot --help >/dev/null 2>&1; then
+ echo "Bundled binary cannot run on this server (requires Linux x86_64). No files changed." >&2
+ exit 1
+fi
 BACKUP="/var/backups/proxy-setup/telegram-upgrade-$(date +%Y%m%d-%H%M%S)-$$"
 install -d -m 700 "$BACKUP"
 cp -a "$BIN" "$BACKUP/vpn-manager"

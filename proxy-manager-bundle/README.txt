@@ -50,3 +50,10 @@ v2.4.6: Android/TV profiles no longer depend on remote rule-set downloads at fir
 
 Traffic statistics in Telegram: see TRAFFIC.md (commands, persistent history,
 API setup, and upgrade-traffic.sh for existing installations).
+
+Telegram permissions update (existing installation, Linux x86_64):
+  sudo bash ./upgrade-telegram-only.sh
+
+The bundle includes the compiled binary; Go is not required on the server.
+The updater backs up the installed binary and sync helper and restarts the enabled
+Telegram service. See TELEGRAM-PERMISSIONS.md for permission controls.
