@@ -285,10 +285,23 @@ func (b *Bot) handleMessage(ctx context.Context, m Message) {
 		cmd = shortcut
 		args = nil
 	}
+	if shortcut := masterShortcut(m.Text); shortcut == "/users" || shortcut == "/add" {
+		cmd = shortcut
+		args = nil
+	}
+	if cmd == "/users" || cmd == "/add" || (len(args) > 0 && isManagedCommand(cmd)) {
+		b.handleMaster(ctx, m, cmd, args)
+		return
+	}
 	b.handleUser(ctx, m, *u, cmd, args)
 }
 
 func (b *Bot) handleUser(ctx context.Context, m Message, u model.User, cmd string, args []string) {
+	if (cmd == "/rotate" || cmd == "/rotate_prompt" || cmd == "/rotate_token") && !b.isMaster(m.From.ID) && (!u.Enabled || !u.CanRotate) {
+		_ = b.sendMessage(ctx, m.Chat.ID, "🔒 Администратор не разрешил смену секретов.")
+		return
+	}
+
 	if cmd != "/start" && cmd != "/help" && cmd != "/menu" {
 		b.ensureNavigation(ctx, m.Chat.ID, b.isMaster(m.From.ID))
 	}
@@ -341,10 +354,33 @@ func (b *Bot) handleUser(ctx context.Context, m Message, u model.User, cmd strin
 }
 
 func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []string) {
+	if !b.authorizeManagement(m.From.ID, cmd, args) {
+		_ = b.sendMessage(ctx, m.Chat.ID, "🔒 Нет разрешения на это действие.")
+		return
+	}
+
 	if cmd != "/start" && cmd != "/help" && cmd != "/menu" {
 		b.ensureNavigation(ctx, m.Chat.ID, b.isMaster(m.From.ID))
 	}
 	switch cmd {
+	case "/permissions":
+		if len(args) != 3 || (args[1] != "rotate" && args[1] != "manage") || (args[2] != "on" && args[2] != "off") {
+			_ = b.sendMessage(ctx, m.Chat.ID, "Используй /permissions NAME rotate|manage on|off")
+			return
+		}
+		err := users.UpdateAccessFile(b.cfg.UsersFile, args[0], func(u *model.User) {
+			if args[1] == "rotate" {
+				u.CanRotate = args[2] == "on"
+			} else {
+				u.CanManageUsers = args[2] == "on"
+			}
+		})
+		if err != nil {
+			_ = b.sendMessage(ctx, m.Chat.ID, "Не удалось изменить права.")
+			return
+		}
+		b.audit(m.From.ID, b.actorRole(m.From.ID), "permission_"+args[1]+"_"+args[2], args[0], "success")
+		b.sendUserCard(ctx, m.Chat.ID, args[0])
 	case "/traffic":
 		if len(args) > 1 {
 			_ = b.sendMessage(ctx, m.Chat.ID, "Используй /traffic или /traffic NAME")
@@ -361,7 +397,7 @@ func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []st
 		}
 
 	case "/start", "/help", "/menu":
-		_ = b.sendMessage(ctx, m.Chat.ID, "👑 Proxy VPN master\n\n/users\n/add NAME\n/delete NAME CONFIRM\n/enable NAME\n/disable NAME\n/rotate NAME\n/rotate_token NAME CONFIRM\n/invite NAME\n/unbind NAME\n/links NAME\n/traffic [NAME] — трафик\n/status\n/selftest\n/xray\n/hysteria\n\nДля управления нажимай кнопки ниже.")
+		_ = b.sendMessage(ctx, m.Chat.ID, "👑 Proxy VPN master\n\n/users\n/permissions NAME rotate|manage on|off\n/add NAME\n/delete NAME CONFIRM\n/enable NAME\n/disable NAME\n/rotate NAME\n/rotate_token NAME CONFIRM\n/invite NAME\n/unbind NAME\n/links NAME\n/traffic [NAME] — трафик\n/status\n/selftest\n/xray\n/hysteria\n\nДля управления нажимай кнопки ниже.")
 		b.sendMenu(ctx, m.Chat.ID, true)
 	case "/users":
 		if len(args) == 0 {
@@ -397,7 +433,7 @@ func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []st
 			return
 		}
 		name := args[0]
-		if _, err := users.FindByNameFile(b.cfg.UsersFile, name); err == nil {
+		if _, err := users.FindByNameFile(b.cfg.UsersFile, name); !errors.Is(err, users.ErrNotFound) {
 			_ = b.sendMessage(ctx, m.Chat.ID, "⚠️ Такой профиль уже существует. Выбери его в списке пользователей.")
 			return
 		}
@@ -408,12 +444,16 @@ func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []st
 			}
 			b.log.Warn("account created but manager returned error", "account", name, "error", safeErr(err))
 		}
+		if err := users.UpdateAccessFile(b.cfg.UsersFile, name, func(u *model.User) { u.CreatedBy = m.From.ID }); err != nil {
+			_ = b.sendMessage(ctx, m.Chat.ID, "Профиль создан, но сохранить создателя не удалось. Обратитесь к администратору.")
+			return
+		}
 		code, err := b.createInvite(name)
 		if err != nil {
 			_ = b.sendMessage(ctx, m.Chat.ID, "✅ Профиль создан, но invitation создать не удалось: "+safeErr(err))
 			return
 		}
-		b.audit(m.From.ID, "master", "create_user", name, "success")
+		b.audit(m.From.ID, b.actorRole(m.From.ID), "create_user", name, "success")
 		_ = b.sendMessage(ctx, m.Chat.ID, "✅ Профиль "+name+" создан.")
 		b.sendInvitation(ctx, m.Chat.ID, name, code)
 	case "/delete":
@@ -428,7 +468,7 @@ func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []st
 			}
 			b.log.Warn("account deleted but manager returned error", "account", args[0], "error", safeErr(err))
 		}
-		b.audit(m.From.ID, "master", "delete_user", args[0], "success")
+		b.audit(m.From.ID, b.actorRole(m.From.ID), "delete_user", args[0], "success")
 		_ = b.sendMessage(ctx, m.Chat.ID, "✅ Профиль удалён.")
 	case "/enable", "/disable", "/rotate":
 		if len(args) != 1 {
@@ -440,7 +480,7 @@ func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []st
 			_ = b.sendMessage(ctx, m.Chat.ID, "❌ "+safeErr(err))
 			return
 		}
-		b.audit(m.From.ID, "master", action, args[0], "success")
+		b.audit(m.From.ID, b.actorRole(m.From.ID), action, args[0], "success")
 		_ = b.sendMessage(ctx, m.Chat.ID, "✅ Done: "+action+" "+args[0])
 	case "/rotate_token":
 		if len(args) != 2 || strings.ToUpper(args[1]) != "CONFIRM" {
@@ -451,7 +491,7 @@ func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []st
 			_ = b.sendMessage(ctx, m.Chat.ID, "❌ "+safeErr(err))
 			return
 		}
-		b.audit(m.From.ID, "master", "rotate_token", args[0], "success")
+		b.audit(m.From.ID, b.actorRole(m.From.ID), "rotate_token", args[0], "success")
 		_ = b.sendMessage(ctx, m.Chat.ID, "✅ Subscription token заменён; старые URL инвалидированы.")
 	case "/invite":
 		if len(args) != 1 {
@@ -477,7 +517,7 @@ func (b *Bot) handleMaster(ctx context.Context, m Message, cmd string, args []st
 			_ = b.sendMessage(ctx, m.Chat.ID, "❌ "+safeErr(err))
 			return
 		}
-		b.audit(m.From.ID, "master", "unbind", args[0], "success")
+		b.audit(m.From.ID, b.actorRole(m.From.ID), "unbind", args[0], "success")
 		_ = b.sendMessage(ctx, m.Chat.ID, "✅ Telegram отвязан.")
 	case "/links":
 		if len(args) != 1 {

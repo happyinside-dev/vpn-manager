@@ -136,6 +136,22 @@ func assign(u *model.User, k, v string) error {
 		u.VLESSUUID = v
 	case "hysteria_password":
 		u.HysteriaPassword = v
+	case "can_rotate", "can_manage_users":
+		value, err := config.BoolValue(v)
+		if err != nil {
+			return err
+		}
+		if k == "can_rotate" {
+			u.CanRotate = value
+		} else {
+			u.CanManageUsers = value
+		}
+	case "created_by":
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return err
+		}
+		u.CreatedBy = id
 	case "telegram_id":
 		if strings.TrimSpace(v) == "" || strings.TrimSpace(v) == "0" {
 			u.TelegramID = 0
@@ -223,6 +239,7 @@ func SyncFromProxyState(usersPath, statePath string) error {
 			VLESSUUID:        a.VLESSUUID,
 			HysteriaPassword: a.HysteriaPassword,
 			TelegramID:       existing[name].TelegramID,
+			CanRotate:        existing[name].CanRotate, CanManageUsers: existing[name].CanManageUsers, CreatedBy: existing[name].CreatedBy,
 		})
 	}
 	return writeUsersYAMLAtomic(usersPath, synced)
@@ -256,6 +273,7 @@ func writeUsersYAMLAtomic(path string, users []model.User) error {
 		fmt.Fprintf(&b, "    enabled: %t\n", u.Enabled)
 		fmt.Fprintf(&b, "    vless_uuid: %q\n", u.VLESSUUID)
 		fmt.Fprintf(&b, "    hysteria_password: %q\n", u.HysteriaPassword)
+		fmt.Fprintf(&b, "    can_rotate: %t\n    can_manage_users: %t\n    created_by: %d\n", u.CanRotate, u.CanManageUsers, u.CreatedBy)
 		if u.TelegramID != 0 {
 			fmt.Fprintf(&b, "    telegram_id: %d\n", u.TelegramID)
 		}
@@ -443,4 +461,24 @@ func lockUsers(path string) (func(), error) {
 		return nil, err
 	}
 	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close() }, nil
+}
+
+// UpdateAccessFile changes administrative metadata under the shared writer lock.
+func UpdateAccessFile(path, name string, update func(*model.User)) error {
+	unlock, err := lockUsers(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	all, err := ListFile(path)
+	if err != nil {
+		return err
+	}
+	for i := range all {
+		if all[i].Name == name {
+			update(&all[i])
+			return writeUsersYAMLAtomic(path, all)
+		}
+	}
+	return ErrNotFound
 }

@@ -1,6 +1,9 @@
 package model
 
 type User struct {
+	CanRotate        bool
+	CanManageUsers   bool
+	CreatedBy        int64
 	Name             string
 	Token            string
 	Enabled          bool

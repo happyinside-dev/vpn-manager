@@ -109,7 +109,47 @@ func (b *Bot) sendMenu(ctx context.Context, chatID int64, master bool) {
 			{{"text": "🔄 Новые секреты"}, {"text": "🏠 Меню"}},
 		}
 	}
-	if err := b.postUI(ctx, chatID, "Выбери действие 👇", map[string]any{"keyboard": rows, "resize_keyboard": true, "is_persistent": true, "one_time_keyboard": false}, ""); err == nil {
+	if !master {
+		if u, err := users.FindByTelegramIDFile(b.cfg.UsersFile, chatID); err == nil {
+			if !u.CanRotate {
+				rows[2] = []map[string]string{{"text": "🏠 Меню"}}
+			}
+			if u.Enabled && u.CanManageUsers {
+				rows = append(rows, []map[string]string{{"text": "👥 Пользователи"}, {"text": "➕ Создать профиль"}})
+			}
+		}
+	}
+	menuText := "Выбери действие 👇"
+	if master {
+		all, err := users.ListFile(b.cfg.UsersFile)
+		if err == nil {
+			var overview strings.Builder
+			overview.WriteString("👥 Создатели профилей\n")
+			groups := map[int64][]string{}
+			order := []int64{}
+			for _, u := range all {
+				if _, ok := groups[u.CreatedBy]; !ok {
+					order = append(order, u.CreatedBy)
+				}
+				groups[u.CreatedBy] = append(groups[u.CreatedBy], u.Name)
+			}
+			for _, id := range order {
+				label := "Администратор / ранее созданные"
+				if id != 0 {
+					label = "Telegram " + strconv.FormatInt(id, 10)
+					for _, u := range all {
+						if u.TelegramID == id {
+							label = u.Name
+							break
+						}
+					}
+				}
+				fmt.Fprintf(&overview, "%s → %s\n", label, strings.Join(groups[id], ", "))
+			}
+			menuText = overview.String() + "\nВыбери действие 👇"
+		}
+	}
+	if err := b.postUI(ctx, chatID, menuText, map[string]any{"keyboard": rows, "resize_keyboard": true, "is_persistent": true, "one_time_keyboard": false}, ""); err == nil {
 		b.mu.Lock()
 		if b.navigation == nil {
 			b.navigation = make(map[int64]bool)
@@ -147,7 +187,20 @@ func (b *Bot) sendUsersMenu(ctx context.Context, chatID int64) {
 		if !u.Enabled {
 			st = "🔴"
 		}
-		rows = append(rows, []uiButton{{Text: st + " " + u.Name, Callback: "user:" + u.Name}})
+		if !b.isMaster(chatID) && !b.owns(chatID, u.Name) {
+			continue
+		}
+		creator := "администратор / ранее создан"
+		if u.CreatedBy != 0 {
+			creator = strconv.FormatInt(u.CreatedBy, 10)
+			for _, parent := range all {
+				if parent.TelegramID == u.CreatedBy {
+					creator = parent.Name
+					break
+				}
+			}
+		}
+		rows = append(rows, []uiButton{{Text: st + " " + u.Name + " · создал: " + creator, Callback: "user:" + u.Name}})
 	}
 	rows = append(rows, []uiButton{{Text: "➕ Создать", Callback: "add"}}, []uiButton{{Text: "🏠 Главное меню", Callback: "menu"}})
 	b.sendInline(ctx, chatID, "👥 Пользователи — выбери профиль:", rows)
@@ -170,14 +223,20 @@ func (b *Bot) sendUserCard(ctx context.Context, chatID int64, name string) {
 	if u.TelegramID != 0 {
 		linked = "да"
 	}
-	b.sendInline(ctx, chatID, fmt.Sprintf("👤 %s\n%s\nTelegram привязан: %s", name, state, linked), [][]uiButton{
+	text := fmt.Sprintf("👤 %s\n%s\nTelegram привязан: %s", name, state, linked)
+	rows := [][]uiButton{
 		{{Text: "🔗 Ссылки", Callback: "links:" + name}, {Text: "🔑 Новый код", Callback: "invite:" + name}},
 		{{Text: "📊 Статистика", Callback: "traffic:" + name}},
 		{{Text: "🔄 Сменить секреты", Callback: "confirm-rotate:" + name}},
 		{{Text: toggle, Callback: act + ":" + name}, {Text: "🗑 Удалить", Callback: "confirm-delete:" + name}},
 		{{Text: "🔓 Отвязать Telegram", Callback: "confirm-unbind:" + name}},
 		{{Text: "⬅️ К списку", Callback: "users"}},
-	})
+	}
+	if b.isMaster(chatID) {
+		text += fmt.Sprintf("\nСмена секретов: %t\nСоздание и управление: %t\nСоздатель Telegram ID: %d", u.CanRotate, u.CanManageUsers, u.CreatedBy)
+		rows = append(rows, []uiButton{{Text: "Секреты: разрешить", Callback: "permission:" + name + ":rotate:on"}, {Text: "Запретить", Callback: "permission:" + name + ":rotate:off"}}, []uiButton{{Text: "Управление: разрешить", Callback: "permission:" + name + ":manage:on"}, {Text: "Запретить", Callback: "permission:" + name + ":manage:off"}})
+	}
+	b.sendInline(ctx, chatID, text, rows)
 }
 func (b *Bot) sendPlatformMenu(ctx context.Context, chatID int64, name string) {
 	b.sendInline(ctx, chatID, "📲 Выбери устройство, затем режим маршрутизации:", [][]uiButton{
@@ -226,7 +285,7 @@ func (b *Bot) handlePending(ctx context.Context, m Message) bool {
 	b.mu.Lock()
 	delete(b.pending, m.Chat.ID)
 	b.mu.Unlock()
-	if !b.isMaster(m.From.ID) {
+	if !b.isMaster(m.From.ID) && !b.canManage(m.From.ID) {
 		return true
 	}
 	if p.Kind == "add" {
@@ -284,12 +343,12 @@ func (b *Bot) handleCallback(ctx context.Context, c CallbackQuery) {
 		b.sendMenu(ctx, chat, master)
 		return
 	}
-	if action == "users" && master {
+	if action == "users" && (master || b.canManage(c.From.ID)) {
 		b.ensureNavigation(ctx, chat, true)
 		b.sendUsersMenu(ctx, chat)
 		return
 	}
-	if action == "add" && master {
+	if action == "add" && (master || b.canManage(c.From.ID)) {
 		b.ensureNavigation(ctx, chat, true)
 		b.startPrompt(ctx, chat, "add", "", "Введи имя нового профиля:")
 		return
@@ -302,7 +361,14 @@ func (b *Bot) handleCallback(ctx context.Context, c CallbackQuery) {
 		_ = b.sendMessage(ctx, chat, "Профиль не найден или уже удалён.")
 		return
 	}
-	if !master && u.TelegramID != c.From.ID {
+	owner := b.owns(c.From.ID, account)
+	if action == "permission" {
+		if master && len(data) == 4 {
+			b.handleMaster(ctx, Message{Chat: Chat{ID: chat}, From: c.From}, "/permissions", data[1:])
+		}
+		return
+	}
+	if !master && !owner && u.TelegramID != c.From.ID {
 		return
 	}
 	b.ensureNavigation(ctx, chat, master)
@@ -310,7 +376,7 @@ func (b *Bot) handleCallback(ctx context.Context, c CallbackQuery) {
 	case "traffic":
 		b.sendTraffic(ctx, chat, account)
 	case "user":
-		if master {
+		if master || owner {
 			b.sendUserCard(ctx, chat, account)
 		}
 	case "links":
@@ -336,7 +402,7 @@ func (b *Bot) handleCallback(ctx context.Context, c CallbackQuery) {
 		}
 
 	case "invite":
-		if !master {
+		if !master && !owner {
 			return
 		}
 		code, e := b.createInvite(account)
@@ -346,17 +412,20 @@ func (b *Bot) handleCallback(ctx context.Context, c CallbackQuery) {
 		}
 		b.sendInvitation(ctx, chat, account, code)
 	case "confirm-delete":
-		if master {
+		if master || owner {
 			b.sendInline(ctx, chat, "⚠️ Точно удалить профиль "+account+"? Все ссылки перестанут работать.", [][]uiButton{{{Text: "🗑 Подтвердить удаление", Callback: "delete:" + account}}, {{Text: "Отмена", Callback: "user:" + account}}})
 		}
 	case "confirm-rotate":
+		if !master && !owner && !u.CanRotate {
+			return
+		}
 		b.sendInline(ctx, chat, "⚠️ Перегенерировать UUID и Hysteria пароль для "+account+"? Ссылка подписки сохранится, но устройства потребуется обновить и переподключить.", [][]uiButton{{{Text: "🔄 Подтвердить", Callback: "rotate:" + account}}, {{Text: "Отмена", Callback: "user:" + account}}})
 	case "confirm-unbind":
-		if master {
+		if master || owner {
 			b.sendInline(ctx, chat, "Отвязать Telegram от "+account+"?", [][]uiButton{{{Text: "Подтвердить", Callback: "unbind:" + account}}, {{Text: "Отмена", Callback: "user:" + account}}})
 		}
 	case "delete", "enable", "disable", "unbind":
-		if !master {
+		if !master && !owner {
 			return
 		}
 		b.handleMaster(ctx, Message{Chat: Chat{ID: chat}, From: c.From}, "/"+action, func() []string {
@@ -367,7 +436,7 @@ func (b *Bot) handleCallback(ctx context.Context, c CallbackQuery) {
 		}())
 		b.sendUsersMenu(ctx, chat)
 	case "rotate":
-		if master {
+		if master || owner {
 			b.handleMaster(ctx, Message{Chat: Chat{ID: chat}, From: c.From}, "/rotate", []string{account})
 		} else {
 			b.handleUser(ctx, Message{Chat: Chat{ID: chat}, From: c.From}, *u, "/rotate", nil)
