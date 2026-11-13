@@ -2,7 +2,7 @@ Proxy Manager v2.4 bundle
 
 Install / update on an existing server:
   chmod +x *.sh vpn-manager
-  sudo ./install-with-subscriptions.sh ./proxy-manager-v2.2.sh -S
+  sudo ./install-with-subscriptions.sh ./proxy-manager.sh -S
 
 Without -S the existing core installer rotates VPN credentials.
 Subscription tokens are preserved by vpn-manager sync-users.

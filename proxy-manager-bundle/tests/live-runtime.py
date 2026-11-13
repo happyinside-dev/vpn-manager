@@ -151,7 +151,7 @@ socks5:
     (d/'xray').write_text('#!/bin/bash\n"'+XRAY+'" "$@" 2>&1 | tee -a "'+str(d/'api.log')+'"\nexit ${PIPESTATUS[0]}\n')
     (d/'xray').chmod(0o700)
     (d/'sync').write_text('#!/bin/sh\nexit 0\n'); (d/'sync').chmod(0o700)
-    core = (ROOT/'proxy-manager-v2.2.sh').read_text()
+    core = (ROOT/'proxy-manager.sh').read_text()
     lib = core[core.index('valid_account_name()'):core.index('# ---------- main ----------')]
     (d/'functions.sh').write_text(lib)
     script = '''set -Eeuo pipefail

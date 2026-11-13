@@ -45,7 +45,7 @@ exit 0
 MOCK
 chmod +x "$TEST_DIR/xray" "$VPNM_BIN"
 # Load function definitions without running the root installer or its traps.
-source <(sed -n '/^valid_account_name()/,/^# ---------- main ----------/p' "$ROOT/proxy-manager-v2.2.sh" | sed '$d')
+source <(sed -n '/^valid_account_name()/,/^# ---------- main ----------/p' "$ROOT/proxy-manager.sh" | sed '$d')
 log(){ :; }; warn(){ :; }; die(){ echo "$*" >&2; exit 1; }
 chown(){ :; }
 systemctl(){ [[ $1 == show ]] || { echo 'UNEXPECTED SERVICE ACTION' >&2; return 90; }; }

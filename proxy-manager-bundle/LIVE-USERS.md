@@ -1,6 +1,6 @@
 # Управление аккаунтами без общего отключения VPN
 
-Изменения относятся к `proxy-manager-v2.5.3-bundle`. Корневой Go-проект с SQLite
+Изменения относятся к `proxy-manager-bundle`. Корневой Go-проект с SQLite
 остаётся отдельной реализацией; переноса аккаунтов между двумя проектами нет.
 
 После обновления команды `proxy-manager account add|enable|disable|rotate|delete`
@@ -17,10 +17,24 @@ Telegram, REALITY-ключи и сертификаты.
 Для самостоятельной сборки (Go 1.23+):
 
 ```bash
-cd proxy-manager-v2.5.3-bundle/src
+cd proxy-manager-bundle/src
 CGO_ENABLED=0 go build -trimpath -o ../vpn-manager-live ./cmd/vpn-manager
 cd ..
 ```
+
+Скрипт обновления выполняется на VPS, где уже установлен bundle. Копия репозитория
+на рабочем компьютере не является установленным сервисом. Перед обновлением можно
+проверить наличие установки без изменения файлов и перезапуска сервисов:
+
+```bash
+sudo bash upgrade-live-users.sh --check
+```
+
+Если проверка сообщает об отсутствующих файлах `/usr/local/libexec/proxy-manager-*`
+или `/etc/proxy-manager/state.json`, подключитесь к установленному VPN-серверу.
+Для новой установки предназначен `install-with-subscriptions.sh ./proxy-manager.sh`;
+полный установщик меняет настройки сервера, поэтому не запускайте его на рабочем
+компьютере ради устранения ошибки upgrade.
 
 На сервере с установленным bundle и подписками:
 

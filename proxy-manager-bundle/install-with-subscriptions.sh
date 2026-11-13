@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 # Bootstrap installer for proxy-manager v2.2 + vpn-manager subscriptions.
 # Usage:
-#   sudo bash install-with-subscriptions.sh [path/to/proxy-manager-v2.2.sh] [installer args...]
+#   sudo bash install-with-subscriptions.sh [path/to/proxy-manager.sh] [installer args...]
 # If the core installer path is omitted, one proxy-manager-v2.2*.sh file is auto-detected next to this script.
 
 [[ $EUID -eq 0 ]] || { echo "[x] Run as root (sudo -i or sudo bash ...)." >&2; exit 1; }
@@ -26,7 +26,7 @@ else
     CORE_SOURCE=${candidates[0]}
   elif (( ${#candidates[@]} == 0 )); then
     echo "[x] Core installer not found next to this script." >&2
-    echo "    Put proxy-manager-v2.2.sh here or pass its path as the first argument." >&2
+    echo "    Put proxy-manager.sh here or pass its path as the first argument." >&2
     exit 1
   else
     echo "[x] Multiple possible core installers found; pass the desired path explicitly:" >&2
@@ -416,5 +416,5 @@ echo "  proxy-manager account delete NAME"
 echo "Subscription credentials are synchronized automatically after those commands."
 echo
 echo "Telegram bot setup (optional):"
-echo "  VPN_TELEGRAM_BOT_TOKEN='123:ABC...' VPN_TELEGRAM_MASTER_ID='123456789' sudo -E ./install-with-subscriptions.sh ./proxy-manager-v2.2.sh -S"
+echo "  VPN_TELEGRAM_BOT_TOKEN='123:ABC...' VPN_TELEGRAM_MASTER_ID='123456789' sudo -E ./install-with-subscriptions.sh ./proxy-manager.sh -S"
 echo "  Multiple masters: VPN_TELEGRAM_MASTER_IDS='123456789,987654321'"

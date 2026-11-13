@@ -6,7 +6,7 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 XRAY_CONF=/usr/local/etc/xray/config.json
 HY_CONF=/etc/hysteria/config.yaml
 CORE=/usr/local/libexec/proxy-manager-core
-for file in "$XRAY_CONF" "$HY_CONF" "$CORE" "$ROOT/vpn-manager" "$ROOT/proxy-manager-v2.2.sh"; do
+for file in "$XRAY_CONF" "$HY_CONF" "$CORE" "$ROOT/vpn-manager" "$ROOT/proxy-manager.sh"; do
  [[ -f $file ]] || { echo "Missing: $file" >&2; exit 1; }
 done
 command -v python3 >/dev/null
@@ -40,7 +40,7 @@ else:
 (root / 'hysteria-new.yaml').write_text(hy)
 PY
 xray run -test -config "$BACKUP/xray-new.json"
-bash -n "$ROOT/proxy-manager-v2.2.sh"
+bash -n "$ROOT/proxy-manager.sh"
 rollback() {
  echo "Upgrade failed; restoring daemon configurations and core. Backup: $BACKUP" >&2
  cp -a "$BACKUP/xray.json" "$XRAY_CONF"
@@ -52,7 +52,7 @@ trap rollback ERR
 # Preserve existing config ownership and modes.
 cat "$BACKUP/xray-new.json" >"$XRAY_CONF"
 cat "$BACKUP/hysteria-new.yaml" >"$HY_CONF"
-install -m 755 "$ROOT/proxy-manager-v2.2.sh" "$CORE"
+install -m 755 "$ROOT/proxy-manager.sh" "$CORE"
 systemctl restart xray hysteria-server
 systemctl is-active --quiet xray
 systemctl is-active --quiet hysteria-server
