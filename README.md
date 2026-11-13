@@ -1,5 +1,7 @@
 # Proxy Manager
 
+🌐 Language: **English** | [Русский](README_RU.md)
+
 Small self-hosted control plane for one Xray VLESS/REALITY + Hysteria 2 VPS. SQLite is authoritative; Xray's in-memory user list is reconciled from SQLite, while Hysteria delegates authentication to Proxy Manager over a loopback-only HTTP endpoint.
 
 ## Architecture
