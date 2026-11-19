@@ -89,14 +89,14 @@ func printLinks(args []string) {
 	fs.StringVar(&usersFile, "users-config", "/etc/vpn-manager/users.yaml", "users config path")
 	fs.StringVar(&baseURL, "base-url", "", "public HTTPS base URL")
 	fs.StringVar(&profileName, "profile-name", "Proxy VPN", "remote profile display name")
-	fs.StringVar(&routing, "routing", "", "routing mode: bypass-ru or blocked (empty preserves legacy URLs)")
+	fs.StringVar(&routing, "routing", "", "routing mode: bypass-ru, blocked or full (empty preserves legacy URLs)")
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 || baseURL == "" {
 		fmt.Fprintln(os.Stderr, "usage: vpn-manager links --base-url https://vpn.example.com [--users-config path] USER")
 		os.Exit(2)
 	}
-	if routing != "" && routing != "bypass-ru" && routing != "blocked" {
-		fmt.Fprintln(os.Stderr, "routing must be bypass-ru or blocked")
+	if routing != "" && routing != "bypass-ru" && routing != "blocked" && routing != "full" {
+		fmt.Fprintln(os.Stderr, "routing must be bypass-ru, blocked or full")
 		os.Exit(2)
 	}
 	name := fs.Arg(0)

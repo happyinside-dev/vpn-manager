@@ -39,7 +39,7 @@ func New(addr string, svc *subscription.Service, log *slog.Logger, rules ...http
 				return
 			}
 			mode := r.PathValue("mode")
-			if mode != "" && mode != "bypass-ru" && mode != "blocked" {
+			if mode != "" && mode != "bypass-ru" && mode != "blocked" && mode != "full" {
 				http.NotFound(w, r)
 				return
 			}

@@ -390,7 +390,7 @@ func (b *Bot) handleCallback(ctx context.Context, c CallbackQuery) {
 			}
 		}
 	case "route":
-		if len(data) != 4 || (data[3] != "bypass-ru" && data[3] != "blocked") {
+		if len(data) != 4 || (data[3] != "bypass-ru" && data[3] != "blocked" && data[3] != "full") {
 			return
 		}
 		if data[2] == "all" {
@@ -450,9 +450,10 @@ var platformVariants = map[string]string{
 }
 
 func (b *Bot) sendRoutingMenu(ctx context.Context, chatID int64, name, platform string) {
-	b.sendInline(ctx, chatID, "Выбери режим:\n\n🌍 Всё через VPN, кроме российских сайтов.\n🎯 Всё напрямую, кроме ресурсов из обновляемого списка блокировок.\n\nВыбор закреплён в ссылке: разные устройства могут использовать разные режимы.", [][]uiButton{
+	b.sendInline(ctx, chatID, "Выбери режим:\n\n🌍 Всё через VPN, кроме российских сайтов.\n🎯 Всё напрямую, кроме ресурсов из обновляемого списка блокировок.\n🚀 Весь трафик через VPN, без списков и исключений для РФ.\n\nВыбор закреплён в ссылке: разные устройства могут использовать разные режимы.", [][]uiButton{
 		{{Text: "🌍 VPN, кроме РФ", Callback: "route:" + name + ":" + platform + ":bypass-ru"}},
 		{{Text: "🎯 Только заблокированные", Callback: "route:" + name + ":" + platform + ":blocked"}},
+		{{Text: "🚀 Весь трафик через VPN", Callback: "route:" + name + ":" + platform + ":full"}},
 		{{Text: "⬅️ Устройства", Callback: "links:" + name}},
 	})
 }
@@ -465,6 +466,9 @@ func (b *Bot) sendRoutedVariant(ctx context.Context, chatID int64, u model.User,
 	modeLabel := "VPN, кроме РФ"
 	if mode == "blocked" {
 		modeLabel = "Только заблокированные"
+	}
+	if mode == "full" {
+		modeLabel = "Весь трафик через VPN"
 	}
 	b.sendVariant(ctx, chatID, u, label+" · "+modeLabel, "/"+platform+"/"+mode, b.cfg.ProfileName+" "+label+" · "+modeLabel)
 	if platform == "openwrt" {

@@ -75,10 +75,10 @@ func TestRoutingCallbackFlowAndPermissions(t *testing.T) {
 		t.Fatal("missing routing menu")
 	}
 	markup := transport.messages[0].Get("reply_markup")
-	if !strings.Contains(markup, "route:alice:openwrt:blocked") || !strings.Contains(markup, "route:alice:openwrt:bypass-ru") {
+	if !strings.Contains(markup, "route:alice:openwrt:full") || !strings.Contains(markup, "route:alice:openwrt:blocked") || !strings.Contains(markup, "route:alice:openwrt:bypass-ru") {
 		t.Fatal("routing choices missing")
 	}
-	for _, mode := range []string{"blocked", "bypass-ru"} {
+	for _, mode := range []string{"blocked", "bypass-ru", "full"} {
 		transport.messages = nil
 		callback(42, "route:alice:openwrt:"+mode)
 		if len(transport.messages) < 1 || !strings.Contains(transport.messages[0].Get("text"), "/openwrt/"+mode) || !strings.Contains(transport.messages[0].Get("reply_markup"), "/openwrt/"+mode+"?import=1") {

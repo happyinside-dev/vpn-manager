@@ -113,7 +113,7 @@ func findTag(m map[string]any, tag string) (map[string]any, bool) {
 
 func TestRoutingModes(t *testing.T) {
 	for _, platform := range []string{"universal", "android", "ios", "macos", "linux", "tv", "openwrt"} {
-		for _, mode := range []string{"bypass-ru", "blocked"} {
+		for _, mode := range []string{"bypass-ru", "blocked", "full"} {
 			t.Run(platform+"/"+mode, func(t *testing.T) {
 				b, err := managedGenerator().GenerateWithRouting(context.Background(), usr, srv(true, true), platform, mode)
 				if err != nil {
@@ -174,6 +174,27 @@ func TestMissingRulesRejected(t *testing.T) {
 	for _, mode := range []string{"blocked", "bypass-ru"} {
 		if _, err := New().GenerateWithRouting(context.Background(), usr, srv(true, true), "tv", mode); err == nil {
 			t.Fatal("missing rules accepted")
+		}
+	}
+}
+
+func TestFullTunnelWithoutRuleManager(t *testing.T) {
+	for _, platform := range []string{"universal", "android", "ios", "macos", "linux", "tv", "openwrt"} {
+		b, err := New().GenerateWithRouting(context.Background(), usr, srv(true, true), platform, "full")
+		if err != nil {
+			t.Fatal(platform, err)
+		}
+		for _, forbidden := range []string{`"rule_set"`, `"domain_suffix"`, `"package_name_regex"`, `"dns-direct"`, `"outbound": "direct"`} {
+			if strings.Contains(string(b), forbidden) {
+				t.Fatalf("%s: full tunnel includes bypass: %s", platform, forbidden)
+			}
+		}
+		var cfg map[string]any
+		if err = json.Unmarshal(b, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg["route"].(map[string]any)["final"] != "proxy" || cfg["dns"].(map[string]any)["final"] != "dns-remote" {
+			t.Fatal("full tunnel policy changed")
 		}
 	}
 }

@@ -33,7 +33,7 @@ func (g *SingBoxGenerator) GenerateForPlatform(ctx context.Context, u model.User
 }
 
 func (g *SingBoxGenerator) GenerateWithRouting(_ context.Context, u model.User, s model.ServerConfig, platform, mode string) ([]byte, error) {
-	if mode != "" && mode != "bypass-ru" && mode != "blocked" {
+	if mode != "" && mode != "bypass-ru" && mode != "blocked" && mode != "full" {
 		return nil, fmt.Errorf("unsupported routing mode %q", mode)
 	}
 	platform = strings.ToLower(strings.TrimSpace(platform))
@@ -205,7 +205,7 @@ func (g *SingBoxGenerator) GenerateWithRouting(_ context.Context, u model.User, 
 	route := cfg["route"].(map[string]any)
 	dns := cfg["dns"].(map[string]any)
 	managed := map[string]map[string]any{}
-	if mode != "" {
+	if mode == "bypass-ru" || mode == "blocked" {
 		if g.Rules == nil {
 			return nil, errors.New("routing rule manager is not configured")
 		}
@@ -239,6 +239,22 @@ func (g *SingBoxGenerator) GenerateWithRouting(_ context.Context, u model.User, 
 		route["final"] = "direct"
 		dns["rules"] = []any{map[string]any{"rule_set": []string{"ru-blocked"}, "server": "dns-remote"}}
 		dns["final"] = "dns-direct"
+	}
+	if mode == "full" {
+		inbound["address"] = []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126"}
+		delete(route, "rule_set")
+		route["rules"] = []any{
+			map[string]any{"action": "sniff"},
+			map[string]any{"protocol": "dns", "action": "hijack-dns"},
+		}
+		route["final"] = "proxy"
+		route["default_domain_resolver"] = "dns-bootstrap"
+		delete(dns, "rules")
+		dns["servers"] = []any{
+			map[string]any{"type": "local", "tag": "dns-bootstrap"},
+			map[string]any{"type": "https", "tag": "dns-remote", "server": "1.1.1.1", "detour": "proxy"},
+		}
+		dns["final"] = "dns-remote"
 	}
 	if platform == "openwrt" {
 		cfg["inbounds"] = []any{inbound, map[string]any{"type": "direct", "tag": "dns-in", "listen": "127.0.0.1", "listen_port": 5353}}

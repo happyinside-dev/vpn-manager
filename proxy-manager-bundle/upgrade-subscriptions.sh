@@ -2,6 +2,12 @@
 # Upgrade subscription service only, using the bundled Linux amd64 binary.
 set -Eeuo pipefail
 [[ $EUID -eq 0 ]] || { echo 'Run via sudo' >&2; exit 1; }
+WITH_TELEGRAM=0
+case "${1:-}" in
+ '') ;;
+ --with-telegram) WITH_TELEGRAM=1 ;;
+ *) echo 'Usage: sudo bash upgrade-subscriptions.sh [--with-telegram]' >&2; exit 2 ;;
+esac
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SOURCE_BIN="$ROOT/vpn-manager-live"
 BIN=/usr/local/bin/vpn-manager
@@ -27,10 +33,11 @@ rollback() {
  if [[ -f $BACKUP/rules.conf ]]; then cp -a "$BACKUP/rules.conf" "$DROPIN"; else rm -f "$DROPIN"; fi
  systemctl daemon-reload
  systemctl restart vpn-manager || true
+ if (( WITH_TELEGRAM )); then systemctl try-restart vpn-manager-telegram || true; fi
 }
 trap rollback ERR
 install -d -m 755 "$(dirname "$DROPIN")"
-install -d -m 750 -o root -g vpn-manager /etc/vpn-manager/rules.d
+install -d -m 750 -o root -g vpn-manager /etc/vpn-manager/rules.d /etc/vpn-manager/rules.d/bypass-ru /etc/vpn-manager/rules.d/blocked
 printf '[Service]\nStateDirectory=vpn-manager\n' >"$DROPIN"
 install -m 755 "$SOURCE_BIN" "$BIN.new"
 mv -f "$BIN.new" "$BIN"
@@ -43,10 +50,15 @@ for ((i=0; i<30; i++)); do
 done
 (( ready == 1 ))
 systemctl is-active --quiet vpn-manager
+if (( WITH_TELEGRAM )) && systemctl is-active --quiet vpn-manager-telegram; then
+ systemctl restart vpn-manager-telegram
+ systemctl is-active --quiet vpn-manager-telegram
+fi
 trap - ERR
 echo "Subscription service updated. Backup: $BACKUP"
-echo 'Xray, Hysteria and Telegram services were not restarted. Subscription URLs are unchanged.'
+echo 'Xray and Hysteria services were not restarted. Subscription URLs are unchanged.'
+if (( WITH_TELEGRAM )); then echo 'An active Telegram bot was reloaded to show the updated routing menu.'; else echo 'Telegram was not restarted; use --with-telegram to reload its menu.'; fi
 if [[ ! -s /etc/vpn-manager/rules.json && ! -e /var/lib/vpn-manager/rules/current/snapshot.json ]]; then
- echo 'Place geoip-ru.srs, geosite-ru-blocked.srs and geoip-ru-blocked.srs in /etc/vpn-manager/rules.d (readable by vpn-manager). They are loaded automatically every 15 seconds; no restart or rules.json required.' >&2
+ echo 'Place geoip-ru.srs in /etc/vpn-manager/rules.d/bypass-ru/; place geosite-ru-blocked.srs and geoip-ru-blocked.srs in /etc/vpn-manager/rules.d/blocked/ (readable by vpn-manager). They are loaded automatically every 15 seconds; no restart or rules.json required.' >&2
 fi
 echo 'Check loading: journalctl -u vpn-manager -n 50 --no-pager; then refresh the client subscription.'

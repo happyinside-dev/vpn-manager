@@ -17,7 +17,7 @@ func TestSingBoxCheck(t *testing.T) {
 	server := srv(true, true)
 	server.VLESS.PublicKey = "WPj_DlCc80VteegkwHWJmtRGUyraQOGEHZWBw61jj0A"
 	for _, platform := range []string{"android", "tv", "ios", "macos", "linux", "universal", "openwrt"} {
-		for _, mode := range []string{"", "bypass-ru", "blocked"} {
+		for _, mode := range []string{"", "bypass-ru", "blocked", "full"} {
 			t.Run(platform+"/"+mode, func(t *testing.T) {
 				b, err := managedGenerator().GenerateWithRouting(context.Background(), usr, server, platform, mode)
 				if err != nil {

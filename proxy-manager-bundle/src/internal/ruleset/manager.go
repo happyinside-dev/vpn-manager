@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -40,14 +41,15 @@ type entry struct {
 type snapshot map[string]entry
 
 type Manager struct {
-	dir, binary   string
-	config        Config
-	client        *http.Client
-	mu            sync.RWMutex
-	update        sync.Mutex
-	current       snapshot
-	pollInterval  time.Duration
-	localSelected atomic.Bool
+	dir, binary        string
+	config             Config
+	client             *http.Client
+	mu                 sync.RWMutex
+	update             sync.Mutex
+	current            snapshot
+	pollInterval       time.Duration
+	localSelected      atomic.Bool
+	structuredSelected atomic.Bool
 }
 
 // New loads the last committed snapshot without contacting upstreams.
@@ -69,7 +71,10 @@ func New(dir, binary string, cfg Config) (*Manager, error) {
 	}
 	for _, tag := range Tags {
 		e, ok := cached[tag]
-		if !ok || fmt.Sprintf("%x", sha256.Sum256(e.Binary)) != e.SHA256 {
+		if !ok {
+			continue
+		}
+		if fmt.Sprintf("%x", sha256.Sum256(e.Binary)) != e.SHA256 {
 			return nil, fmt.Errorf("invalid cached %s checksum", tag)
 		}
 		disk, err := os.ReadFile(filepath.Join(dir, "current", tag+".srs"))
@@ -82,6 +87,11 @@ func New(dir, binary string, cfg Config) (*Manager, error) {
 		}
 		e.Rules = rules
 		cached[tag] = e
+	}
+	_, domains := cached["ru-blocked"]
+	_, ips := cached["ru-blocked-ip"]
+	if domains != ips {
+		return nil, fmt.Errorf("incomplete cached blocked rules")
 	}
 	m.current = cached
 	return m, nil
@@ -170,8 +180,8 @@ func (m *Manager) useLocal() (bool, error) {
 	if m.localSelected.Load() || len(m.config.Sources) == 0 {
 		return true, nil
 	}
-	for _, name := range localFiles {
-		_, err := os.Stat(filepath.Join(m.config.LocalDir, name))
+	for tag := range localFiles {
+		_, err := os.Stat(m.localPath(tag))
 		if err == nil {
 			m.localSelected.Store(true)
 			return true, nil
@@ -181,6 +191,84 @@ func (m *Manager) useLocal() (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func localGroup(tag string) string {
+	if tag == "geoip-ru" {
+		return "bypass-ru"
+	}
+	return "blocked"
+}
+
+func (m *Manager) localPath(tag string) string {
+	nested := filepath.Join(m.config.LocalDir, localGroup(tag), localFiles[tag])
+	if _, err := os.Lstat(nested); !os.IsNotExist(err) {
+		return nested
+	}
+	return filepath.Join(m.config.LocalDir, localFiles[tag])
+}
+
+func (m *Manager) structuredLocal() bool {
+	if m.structuredSelected.Load() {
+		return true
+	}
+	for tag, name := range localFiles {
+		if _, err := os.Lstat(filepath.Join(m.config.LocalDir, localGroup(tag), name)); !os.IsNotExist(err) {
+			m.structuredSelected.Store(true)
+			return true
+		}
+	}
+	for _, name := range localFiles {
+		if _, err := os.Lstat(filepath.Join(m.config.LocalDir, name)); !os.IsNotExist(err) {
+			return false
+		}
+	}
+	return true
+}
+
+// Each mode is a separate transaction; blocked always needs its domain and IP lists together.
+func (m *Manager) refreshLocalGroups(ctx context.Context) error {
+	var failures []error
+	for _, tags := range [][]string{{"geoip-ru"}, {"ru-blocked", "ru-blocked-ip"}} {
+		m.mu.RLock()
+		next := snapshot{}
+		for tag, e := range m.current {
+			next[tag] = e
+		}
+		m.mu.RUnlock()
+		err := func() error {
+			for _, tag := range tags {
+				path := filepath.Join(m.config.LocalDir, localGroup(tag), localFiles[tag])
+				b, err := readLocal(path)
+				if err != nil {
+					return fmt.Errorf("%s: %w", localGroup(tag), err)
+				}
+				sum := fmt.Sprintf("%x", sha256.Sum256(b))
+				if old, ok := next[tag]; ok && old.SHA256 == sum {
+					continue
+				}
+				rules, err := m.validate(ctx, b)
+				if err != nil {
+					return fmt.Errorf("%s: %w", tag, err)
+				}
+				next[tag] = entry{Binary: b, Rules: rules, SHA256: sum}
+			}
+			for _, tag := range tags {
+				b, err := readLocal(filepath.Join(m.config.LocalDir, localGroup(tag), localFiles[tag]))
+				if err != nil {
+					return err
+				}
+				if fmt.Sprintf("%x", sha256.Sum256(b)) != next[tag].SHA256 {
+					return fmt.Errorf("%s changed during validation", tag)
+				}
+			}
+			return m.commit(next)
+		}()
+		if err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func readLocal(path string) ([]byte, error) {
@@ -217,13 +305,17 @@ func readLocal(path string) ([]byte, error) {
 	return b, nil
 }
 
-// Refresh commits all three files together. Any failure preserves the entire old generation.
+// Refresh updates each local mode independently; a blocked domain/IP pair is atomic.
+// Legacy flat directories and HTTPS sources retain their complete-set transaction.
 func (m *Manager) Refresh(ctx context.Context) error {
 	m.update.Lock()
 	defer m.update.Unlock()
 	local, err := m.useLocal()
 	if err != nil {
 		return err
+	}
+	if local && m.structuredLocal() {
+		return m.refreshLocalGroups(ctx)
 	}
 	next := snapshot{}
 	for _, tag := range Tags {
@@ -269,6 +361,10 @@ func (m *Manager) Refresh(ctx context.Context) error {
 			}
 		}
 	}
+	return m.commit(next)
+}
+
+func (m *Manager) commit(next snapshot) error {
 	m.mu.RLock()
 	unchanged := len(m.current) == len(next)
 	for _, tag := range Tags {
@@ -310,8 +406,8 @@ func (m *Manager) Refresh(ctx context.Context) error {
 		}
 		return f.Close()
 	}
-	for _, tag := range Tags {
-		if err = write(tag+".srs", next[tag].Binary); err != nil {
+	for tag, e := range next {
+		if err = write(tag+".srs", e.Binary); err != nil {
 			return err
 		}
 	}
@@ -420,6 +516,9 @@ func (m *Manager) Run(ctx context.Context, log *slog.Logger) {
 			if err == nil {
 				err = m.Refresh(ctx)
 			}
+			if before != m.revision() {
+				log.Info("rule-set snapshot updated", "local", local)
+			}
 			if err != nil {
 				if err.Error() != lastError {
 					log.Warn("rule-set refresh failed; retaining last good snapshot", "error", err)
@@ -427,9 +526,6 @@ func (m *Manager) Run(ctx context.Context, log *slog.Logger) {
 				}
 				nextRemote = time.Now().Add(5 * time.Minute)
 			} else {
-				if before != m.revision() {
-					log.Info("rule-set snapshot updated", "local", local)
-				}
 				lastError = ""
 				nextRemote = time.Now().Add(24 * time.Hour)
 			}

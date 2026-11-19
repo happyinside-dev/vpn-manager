@@ -281,3 +281,83 @@ func TestLocalOverridesRemoteSources(t *testing.T) {
 		t.Fatal("last good rules lost")
 	}
 }
+
+func TestSeparateModeDirectories(t *testing.T) {
+	binary, err := exec.LookPath("sing-box")
+	if err != nil {
+		t.Skip("sing-box not installed")
+	}
+	input, cache := t.TempDir(), t.TempDir()
+	a, b := compileFixture(t, binary, "first.example"), compileFixture(t, binary, "second.example")
+	for _, mode := range []string{"bypass-ru", "blocked"} {
+		if err := os.Mkdir(filepath.Join(input, mode), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(tag string, data []byte) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(input, localGroup(tag), localFiles[tag]), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := New(cache, binary, Config{LocalDir: input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write("geoip-ru", a)
+	// An absent blocked mode must not prevent publishing bypass-ru or restarting.
+	_ = m.Refresh(context.Background())
+	if _, err := m.Inline("geoip-ru"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Inline("ru-blocked"); err == nil {
+		t.Fatal("missing blocked mode accepted")
+	}
+	restored, err := New(cache, binary, Config{LocalDir: input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restored.Inline("geoip-ru"); err != nil {
+		t.Fatal(err)
+	}
+	write("ru-blocked", a)
+	_ = m.Refresh(context.Background())
+	if _, err := m.Inline("ru-blocked"); err == nil {
+		t.Fatal("partial blocked pair published")
+	}
+	write("ru-blocked-ip", a)
+	if err := m.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.RLock()
+	oldDomain, oldIP := m.current["ru-blocked"].SHA256, m.current["ru-blocked-ip"].SHA256
+	m.mu.RUnlock()
+	write("ru-blocked", b)
+	write("ru-blocked-ip", []byte("broken"))
+	write("geoip-ru", b)
+	if err := m.Refresh(context.Background()); err == nil {
+		t.Fatal("corrupt blocked set accepted")
+	}
+	m.mu.RLock()
+	domain, ip, ru := m.current["ru-blocked"].SHA256, m.current["ru-blocked-ip"].SHA256, m.current["geoip-ru"].SHA256
+	m.mu.RUnlock()
+	if domain != oldDomain || ip != oldIP {
+		t.Fatal("blocked pair changed partially")
+	}
+	if ru == oldIP {
+		t.Fatal("blocked failure prevented bypass update")
+	}
+	// Conversely, corrupt bypass cannot prevent a valid blocked update.
+	write("geoip-ru", []byte("broken"))
+	write("ru-blocked-ip", b)
+	_ = m.Refresh(context.Background())
+	m.mu.RLock()
+	domain, ip = m.current["ru-blocked"].SHA256, m.current["ru-blocked-ip"].SHA256
+	m.mu.RUnlock()
+	if domain == oldDomain || ip == oldIP {
+		t.Fatal("bypass failure prevented blocked update")
+	}
+	if _, err := New(cache, binary, Config{LocalDir: input}); err != nil {
+		t.Fatal(err)
+	}
+}

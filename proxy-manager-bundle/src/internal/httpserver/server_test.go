@@ -121,7 +121,7 @@ func (gen) GenerateWithRouting(_ context.Context, _ model.User, _ model.ServerCo
 
 func TestRoutedSubscriptions(t *testing.T) {
 	for _, platform := range []string{"universal", "android", "ios", "macos", "linux", "tv", "openwrt"} {
-		for _, mode := range []string{"bypass-ru", "blocked"} {
+		for _, mode := range []string{"bypass-ru", "blocked", "full"} {
 			path := "/sub/good-token-abcdefghijklmnopqrstuvwxyz/" + platform + "/" + mode
 			for _, query := range []string{"", "?import=1"} {
 				w := httptest.NewRecorder()

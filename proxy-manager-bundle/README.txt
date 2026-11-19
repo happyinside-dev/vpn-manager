@@ -1,13 +1,18 @@
 Subscription/routing updates on an EXISTING server (Linux x86_64):
   git pull
   cd proxy-manager-bundle
-  sudo bash ./upgrade-subscriptions.sh
+  sudo bash ./upgrade-subscriptions.sh --with-telegram
 
 Ready-to-run vpn-manager and vpn-manager-live binaries are included; no Go on VPS.
-This updater restarts only vpn-manager. It preserves server/users configuration,
-subscription tokens, and does not restart Telegram, Xray or Hysteria.
-Drop your three SRS files into /etc/vpn-manager/rules.d:
-  geoip-ru.srs, geosite-ru-blocked.srs, geoip-ru-blocked.srs
+Without --with-telegram the updater restarts only vpn-manager. With this flag it
+also reloads the active Telegram bot to show the new routing menu. Server/users
+configuration and tokens are preserved; Xray and Hysteria are not restarted.
+Three routing choices: bypass-ru, blocked, full (all traffic via VPN, no rule sets).
+Separate input directories:
+  /etc/vpn-manager/rules.d/bypass-ru/geoip-ru.srs
+  /etc/vpn-manager/rules.d/blocked/geosite-ru-blocked.srs
+  /etc/vpn-manager/rules.d/blocked/geoip-ru-blocked.srs
+The full mode needs no files. The other two sets update independently.
 They are checked automatically every 15 seconds; refresh the client subscription
 once loaded. No rules.json or HTTPS source is needed for local files.
 A local sing-box executable is still required for SRS validation. See RULESETS.md.
