@@ -1,3 +1,15 @@
+Subscription/routing updates on an EXISTING server (Linux x86_64):
+  git pull
+  cd proxy-manager-bundle
+  sudo bash ./upgrade-subscriptions.sh
+
+Ready-to-run vpn-manager and vpn-manager-live binaries are included; no Go on VPS.
+This updater restarts only vpn-manager. It preserves server/users configuration,
+subscription tokens, and does not restart Telegram, Xray or Hysteria.
+For first-time rule source setup and the sing-box validator requirement: RULESETS.md.
+Release maintainers: run ./build-binaries.sh on a machine with Go and commit both
+binaries plus binaries.sha256 with every source change.
+
 Proxy Manager v2.4 bundle
 
 Install / update on an existing server:
