@@ -30,6 +30,7 @@ rollback() {
 }
 trap rollback ERR
 install -d -m 755 "$(dirname "$DROPIN")"
+install -d -m 750 -o root -g vpn-manager /etc/vpn-manager/rules.d
 printf '[Service]\nStateDirectory=vpn-manager\n' >"$DROPIN"
 install -m 755 "$SOURCE_BIN" "$BIN.new"
 mv -f "$BIN.new" "$BIN"
@@ -46,6 +47,6 @@ trap - ERR
 echo "Subscription service updated. Backup: $BACKUP"
 echo 'Xray, Hysteria and Telegram services were not restarted. Subscription URLs are unchanged.'
 if [[ ! -s /etc/vpn-manager/rules.json && ! -e /var/lib/vpn-manager/rules/current/snapshot.json ]]; then
- echo 'Routing modes need an initial rule snapshot: configure /etc/vpn-manager/rules.json (see RULESETS.md), then restart vpn-manager.' >&2
+ echo 'Place geoip-ru.srs, geosite-ru-blocked.srs and geoip-ru-blocked.srs in /etc/vpn-manager/rules.d (readable by vpn-manager). They are loaded automatically every 15 seconds; no restart or rules.json required.' >&2
 fi
 echo 'Check loading: journalctl -u vpn-manager -n 50 --no-pager; then refresh the client subscription.'

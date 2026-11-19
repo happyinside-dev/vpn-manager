@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,7 +29,8 @@ type Source struct {
 	SHA256 string `json:"sha256,omitempty"`
 }
 type Config struct {
-	Sources map[string]Source `json:"sources"`
+	Sources  map[string]Source `json:"sources"`
+	LocalDir string            `json:"-"`
 }
 type entry struct {
 	Binary []byte          `json:"binary"`
@@ -38,12 +40,14 @@ type entry struct {
 type snapshot map[string]entry
 
 type Manager struct {
-	dir, binary string
-	config      Config
-	client      *http.Client
-	mu          sync.RWMutex
-	update      sync.Mutex
-	current     snapshot
+	dir, binary   string
+	config        Config
+	client        *http.Client
+	mu            sync.RWMutex
+	update        sync.Mutex
+	current       snapshot
+	pollInterval  time.Duration
+	localSelected atomic.Bool
 }
 
 // New loads the last committed snapshot without contacting upstreams.
@@ -51,7 +55,7 @@ func New(dir, binary string, cfg Config) (*Manager, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
-	m := &Manager{dir: dir, binary: binary, config: cfg, client: &http.Client{Timeout: 90 * time.Second}, current: snapshot{}}
+	m := &Manager{dir: dir, binary: binary, config: cfg, client: &http.Client{Timeout: 90 * time.Second}, current: snapshot{}, pollInterval: 15 * time.Second}
 	b, err := os.ReadFile(filepath.Join(dir, "current", "snapshot.json"))
 	if os.IsNotExist(err) {
 		return m, nil
@@ -123,49 +127,147 @@ func (m *Manager) validate(ctx context.Context, b []byte) (json.RawMessage, erro
 	return json.Marshal(source.Rules)
 }
 
+func (m *Manager) download(ctx context.Context, tag string, src Source) ([]byte, error) {
+	u, err := url.Parse(src.URL)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return nil, fmt.Errorf("%s requires an HTTPS source", tag)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.URL, nil)
+	if err != nil {
+		return nil, err
+	}
+	client := *m.client
+	client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		if r.URL.Scheme != "https" || len(via) >= 5 {
+			return fmt.Errorf("unsafe redirect")
+		}
+		return nil
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", tag, err)
+	}
+	b, readErr := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || readErr != nil || len(b) > maxSize {
+		return nil, fmt.Errorf("%s download failed (HTTP %d)", tag, resp.StatusCode)
+	}
+	return b, nil
+}
+
+var localFiles = map[string]string{
+	"geoip-ru":      "geoip-ru.srs",
+	"ru-blocked":    "geosite-ru-blocked.srs",
+	"ru-blocked-ip": "geoip-ru-blocked.srs",
+}
+
+// Any recognized local file selects the complete local set. Never silently mix
+// a partially uploaded local generation with upstream data.
+func (m *Manager) useLocal() (bool, error) {
+	if m.config.LocalDir == "" {
+		return false, nil
+	}
+	if m.localSelected.Load() || len(m.config.Sources) == 0 {
+		return true, nil
+	}
+	for _, name := range localFiles {
+		_, err := os.Stat(filepath.Join(m.config.LocalDir, name))
+		if err == nil {
+			m.localSelected.Store(true)
+			return true, nil
+		}
+		if !os.IsNotExist(err) {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+func readLocal(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular SRS input file: %s", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	before, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !before.Mode().IsRegular() || before.Size() > maxSize {
+		return nil, fmt.Errorf("not a regular SRS file or exceeds size limit: %s", path)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxSize+1))
+	if err != nil {
+		return nil, err
+	}
+	after, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxSize || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		return nil, fmt.Errorf("local file changed while reading: %s", path)
+	}
+	return b, nil
+}
+
 // Refresh commits all three files together. Any failure preserves the entire old generation.
 func (m *Manager) Refresh(ctx context.Context) error {
 	m.update.Lock()
 	defer m.update.Unlock()
+	local, err := m.useLocal()
+	if err != nil {
+		return err
+	}
 	next := snapshot{}
 	for _, tag := range Tags {
-		src, ok := m.config.Sources[tag]
-		if !ok {
-			return fmt.Errorf("missing source %s", tag)
-		}
-		u, err := url.Parse(src.URL)
-		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
-			return fmt.Errorf("%s requires an HTTPS source", tag)
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.URL, nil)
-		if err != nil {
-			return err
-		}
-		client := *m.client
-		client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
-			if r.URL.Scheme != "https" || len(via) >= 5 {
-				return fmt.Errorf("unsafe redirect")
+		src := m.config.Sources[tag]
+		var b []byte
+		var err error
+		if local {
+			b, err = readLocal(filepath.Join(m.config.LocalDir, localFiles[tag]))
+		} else {
+			if src.URL == "" {
+				return fmt.Errorf("missing source %s", tag)
 			}
-			return nil
+			b, err = m.download(ctx, tag, src)
 		}
-		resp, err := client.Do(req)
 		if err != nil {
 			return fmt.Errorf("%s: %w", tag, err)
 		}
-		b, readErr := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK || readErr != nil || len(b) > maxSize {
-			return fmt.Errorf("%s download failed (HTTP %d)", tag, resp.StatusCode)
-		}
 		sum := fmt.Sprintf("%x", sha256.Sum256(b))
-		if src.SHA256 != "" && src.SHA256 != sum {
+		if !local && src.SHA256 != "" && src.SHA256 != sum {
 			return fmt.Errorf("%s checksum mismatch", tag)
+		}
+		m.mu.RLock()
+		previous, exists := m.current[tag]
+		m.mu.RUnlock()
+		if exists && previous.SHA256 == sum {
+			next[tag] = previous
+			continue
 		}
 		rules, err := m.validate(ctx, b)
 		if err != nil {
 			return fmt.Errorf("%s: %w", tag, err)
 		}
 		next[tag] = entry{Binary: b, Rules: rules, SHA256: sum}
+	}
+	if local {
+		for _, tag := range Tags {
+			b, err := readLocal(filepath.Join(m.config.LocalDir, localFiles[tag]))
+			if err != nil {
+				return err
+			}
+			if fmt.Sprintf("%x", sha256.Sum256(b)) != next[tag].SHA256 {
+				return fmt.Errorf("local rule files changed during validation; retrying next scan")
+			}
+		}
 	}
 	m.mu.RLock()
 	unchanged := len(m.current) == len(next)
@@ -295,19 +397,44 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, tag+".srs", time.Time{}, bytes.NewReader(e.Binary))
 }
 
+func (m *Manager) revision() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var revision string
+	for _, tag := range Tags {
+		revision += m.current[tag].SHA256
+	}
+	return revision
+}
+
 func (m *Manager) Run(ctx context.Context, log *slog.Logger) {
+	var nextRemote time.Time
+	var lastError string
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		delay := 24 * time.Hour
-		if err := m.Refresh(ctx); err != nil {
-			log.Warn("rule-set refresh failed; retaining last good snapshot", "error", err)
-			delay = 5 * time.Minute
-		} else {
-			log.Info("rule-set snapshot updated")
+		local, err := m.useLocal()
+		if err != nil || local || !time.Now().Before(nextRemote) {
+			before := m.revision()
+			if err == nil {
+				err = m.Refresh(ctx)
+			}
+			if err != nil {
+				if err.Error() != lastError {
+					log.Warn("rule-set refresh failed; retaining last good snapshot", "error", err)
+					lastError = err.Error()
+				}
+				nextRemote = time.Now().Add(5 * time.Minute)
+			} else {
+				if before != m.revision() {
+					log.Info("rule-set snapshot updated", "local", local)
+				}
+				lastError = ""
+				nextRemote = time.Now().Add(24 * time.Hour)
+			}
 		}
-		timer := time.NewTimer(delay)
+		timer := time.NewTimer(m.pollInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()

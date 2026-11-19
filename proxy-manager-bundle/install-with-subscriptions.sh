@@ -97,6 +97,7 @@ ensure_identity() {
     useradd --system --gid "$VPNM_GROUP" --home-dir /nonexistent --shell /usr/sbin/nologin "$VPNM_USER"
   fi
   install -d -m 750 -o root -g "$VPNM_GROUP" "$VPNM_DIR"
+  install -d -m 750 -o root -g "$VPNM_GROUP" "$VPNM_DIR/rules.d"
 }
 
 backup_configs() {

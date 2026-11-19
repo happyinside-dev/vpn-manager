@@ -137,6 +137,7 @@ func serve(args []string) {
 	var serverFile, usersFile, listen string
 	rulesDir := fs.String("rules-dir", "/var/lib/vpn-manager/rules", "persistent rule snapshot directory")
 	rulesConfig := fs.String("rules-config", "/etc/vpn-manager/rules.json", "upstream rule sources JSON")
+	rulesInput := fs.String("rules-input-dir", "/etc/vpn-manager/rules.d", "directory containing local SRS input files")
 	singBox := fs.String("sing-box", "sing-box", "Sing-box validator executable")
 	fs.StringVar(&serverFile, "server-config", "/etc/vpn-manager/server.yaml", "server config path")
 	fs.StringVar(&usersFile, "users-config", "/etc/vpn-manager/users.yaml", "users config path")
@@ -164,6 +165,7 @@ func serve(args []string) {
 		log.Error("read rule sources", "error", err)
 		os.Exit(1)
 	}
+	rc.LocalDir = *rulesInput
 	rm, err := ruleset.New(*rulesDir, *singBox, rc)
 	if err != nil {
 		log.Error("load rule snapshot", "error", err)

@@ -6,7 +6,11 @@ Subscription/routing updates on an EXISTING server (Linux x86_64):
 Ready-to-run vpn-manager and vpn-manager-live binaries are included; no Go on VPS.
 This updater restarts only vpn-manager. It preserves server/users configuration,
 subscription tokens, and does not restart Telegram, Xray or Hysteria.
-For first-time rule source setup and the sing-box validator requirement: RULESETS.md.
+Drop your three SRS files into /etc/vpn-manager/rules.d:
+  geoip-ru.srs, geosite-ru-blocked.srs, geoip-ru-blocked.srs
+They are checked automatically every 15 seconds; refresh the client subscription
+once loaded. No rules.json or HTTPS source is needed for local files.
+A local sing-box executable is still required for SRS validation. See RULESETS.md.
 Release maintainers: run ./build-binaries.sh on a machine with Go and commit both
 binaries plus binaries.sha256 with every source change.
 
