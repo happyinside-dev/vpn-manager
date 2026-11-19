@@ -16,7 +16,11 @@ type Generator interface {
 	GenerateWithRouting(context.Context, model.User, model.ServerConfig, string, string) ([]byte, error)
 }
 
-type SingBoxGenerator struct{}
+type RuleProvider interface {
+	InlineSets([]string) (map[string]map[string]any, error)
+}
+
+type SingBoxGenerator struct{ Rules RuleProvider }
 
 func New() *SingBoxGenerator { return &SingBoxGenerator{} }
 
@@ -200,19 +204,30 @@ func (g *SingBoxGenerator) GenerateWithRouting(_ context.Context, u model.User, 
 	// Legacy URLs keep their existing inline-only bootstrap behavior.
 	route := cfg["route"].(map[string]any)
 	dns := cfg["dns"].(map[string]any)
+	managed := map[string]map[string]any{}
 	if mode != "" {
-		cfg["http_clients"] = []any{map[string]any{"tag": "rules-vpn", "detour": "proxy", "domain_resolver": "dns-bootstrap"}}
-		route["default_http_client"] = "rules-vpn"
+		if g.Rules == nil {
+			return nil, errors.New("routing rule manager is not configured")
+		}
+		tags := []string{"geoip-ru"}
+		if mode == "blocked" {
+			tags = []string{"ru-blocked", "ru-blocked-ip"}
+		}
+		var err error
+		managed, err = g.Rules.InlineSets(tags)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if mode == "bypass-ru" {
-		ruleSets = append(ruleSets, remoteRuleSet("geoip-ru", "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs"))
+		ruleSets = append(ruleSets, managed["geoip-ru"])
 		route["rule_set"] = ruleSets
 		route["rules"] = append(routeRules, map[string]any{"rule_set": []string{"geoip-ru"}, "outbound": "direct"})
 	}
 	if mode == "blocked" {
 		route["rule_set"] = []any{
-			remoteRuleSet("ru-blocked", "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geosite/geosite-ru-blocked.srs"),
-			remoteRuleSet("ru-blocked-ip", "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/sing-box/rule-set-geoip/geoip-ru-blocked.srs"),
+			managed["ru-blocked"],
+			managed["ru-blocked-ip"],
 		}
 		route["rules"] = []any{
 			map[string]any{"action": "sniff"},
@@ -238,10 +253,4 @@ func (g *SingBoxGenerator) GenerateWithRouting(_ context.Context, u model.User, 
 		return nil, fmt.Errorf("marshal sing-box profile: %w", err)
 	}
 	return append(b, '\n'), nil
-}
-
-// Download through the configured VPN so rules can bootstrap even if their
-// hosting is blocked by the local ISP. sing-box caches them between restarts.
-func remoteRuleSet(tag, url string) map[string]any {
-	return map[string]any{"type": "remote", "tag": tag, "format": "binary", "url": url, "http_client": "rules-vpn", "update_interval": "1d"}
 }

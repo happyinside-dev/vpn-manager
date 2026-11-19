@@ -119,3 +119,10 @@ vpn-manager links --base-url https://vpn.example.com --routing bypass-ru USER
 cd src
 CGO_ENABLED=0 go build -trimpath -o ../vpn-manager ./cmd/vpn-manager
 ```
+
+## Локальное управление списками
+
+Генератор больше не отправляет клиентам GitHub URL правил. Настройка источников,
+хранение снимков, собственный HTTPS API и первичное наполнение описаны в
+[RULESETS.md](RULESETS.md). Явные режимы требуют первоначального проверенного
+снимка; после этого конфигурация содержит списки inline и запускается без загрузок.

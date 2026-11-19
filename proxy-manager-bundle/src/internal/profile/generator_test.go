@@ -115,13 +115,18 @@ func TestRoutingModes(t *testing.T) {
 	for _, platform := range []string{"universal", "android", "ios", "macos", "linux", "tv", "openwrt"} {
 		for _, mode := range []string{"bypass-ru", "blocked"} {
 			t.Run(platform+"/"+mode, func(t *testing.T) {
-				b, err := New().GenerateWithRouting(context.Background(), usr, srv(true, true), platform, mode)
+				b, err := managedGenerator().GenerateWithRouting(context.Background(), usr, srv(true, true), platform, mode)
 				if err != nil {
 					t.Fatal(err)
 				}
 				var cfg map[string]any
 				if err := json.Unmarshal(b, &cfg); err != nil {
 					t.Fatal(err)
+				}
+				for _, forbidden := range []string{"raw.githubusercontent.com", `"http_clients"`, `"type": "remote"`} {
+					if strings.Contains(string(b), forbidden) {
+						t.Fatalf("client network dependency: %s", forbidden)
+					}
 				}
 				route := cfg["route"].(map[string]any)
 				dns := cfg["dns"].(map[string]any)
@@ -152,5 +157,23 @@ func TestRoutingModes(t *testing.T) {
 func TestRejectInvalidRouting(t *testing.T) {
 	if _, err := New().GenerateWithRouting(context.Background(), usr, srv(true, true), "openwrt", "typo"); err == nil {
 		t.Fatal("invalid mode accepted")
+	}
+}
+
+type testRules struct{}
+
+func (testRules) InlineSets(tags []string) (map[string]map[string]any, error) {
+	sets := map[string]map[string]any{}
+	for _, tag := range tags {
+		sets[tag] = map[string]any{"type": "inline", "tag": tag, "rules": []any{map[string]any{"domain_suffix": []string{"example.org"}}}}
+	}
+	return sets, nil
+}
+func managedGenerator() *SingBoxGenerator { g := New(); g.Rules = testRules{}; return g }
+func TestMissingRulesRejected(t *testing.T) {
+	for _, mode := range []string{"blocked", "bypass-ru"} {
+		if _, err := New().GenerateWithRouting(context.Background(), usr, srv(true, true), "tv", mode); err == nil {
+			t.Fatal("missing rules accepted")
+		}
 	}
 }

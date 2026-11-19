@@ -176,6 +176,7 @@ TimeoutStopSec=15s
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
+StateDirectory=vpn-manager
 ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

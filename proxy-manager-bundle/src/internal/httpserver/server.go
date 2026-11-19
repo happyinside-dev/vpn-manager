@@ -21,8 +21,11 @@ var publicHostRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.:-]{0,252}$`)
 
 type Server struct{ http *http.Server }
 
-func New(addr string, svc *subscription.Service, log *slog.Logger) *Server {
+func New(addr string, svc *subscription.Service, log *slog.Logger, rules ...http.Handler) *Server {
 	mux := http.NewServeMux()
+	if len(rules) > 0 {
+		mux.Handle("GET /sub/rules/files/{tag}/file.srs", rules[0])
+	}
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -45,7 +48,11 @@ func New(addr string, svc *subscription.Service, log *slog.Logger) *Server {
 				if !errors.Is(err, users.ErrNotFound) {
 					log.Error("subscription generation failed", "error", err, "platform", platform)
 				}
-				http.NotFound(w, r)
+				if errors.Is(err, users.ErrNotFound) {
+					http.NotFound(w, r)
+				} else {
+					http.Error(w, "subscription temporarily unavailable", http.StatusServiceUnavailable)
+				}
 				return
 			}
 			if r.URL.Query().Get("import") == "1" {

@@ -152,3 +152,14 @@ func TestRoutedSubscriptions(t *testing.T) {
 		}
 	}
 }
+
+func TestRuleEndpointWiring(t *testing.T) {
+	svc := subscription.New(us{}, sp{}, gen{})
+	ruleHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(r.PathValue("tag"))) })
+	h := New("127.0.0.1:0", svc, slog.Default(), ruleHandler).HTTP().Handler
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/sub/rules/files/geoip-ru/file.srs", nil))
+	if w.Code != 200 || w.Body.String() != "geoip-ru" {
+		t.Fatalf("%d: %s", w.Code, w.Body.String())
+	}
+}

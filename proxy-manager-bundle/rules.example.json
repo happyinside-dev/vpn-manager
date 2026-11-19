@@ -1,0 +1,7 @@
+{
+  "sources": {
+    "geoip-ru": {"url": "https://rules.example.com/geoip-ru.srs"},
+    "ru-blocked": {"url": "https://rules.example.com/geosite-ru-blocked.srs"},
+    "ru-blocked-ip": {"url": "https://rules.example.com/geoip-ru-blocked.srs"}
+  }
+}

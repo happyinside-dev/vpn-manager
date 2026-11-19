@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"proxy-dev/vpn-manager/internal/importurl"
 	"proxy-dev/vpn-manager/internal/liveauth"
 	"proxy-dev/vpn-manager/internal/profile"
+	"proxy-dev/vpn-manager/internal/ruleset"
 	"proxy-dev/vpn-manager/internal/server"
 	"proxy-dev/vpn-manager/internal/subscription"
 	"proxy-dev/vpn-manager/internal/telegrambot"
@@ -133,6 +135,9 @@ func printLinks(args []string) {
 func serve(args []string) {
 	fs := flag.NewFlagSet("vpn-manager", flag.ExitOnError)
 	var serverFile, usersFile, listen string
+	rulesDir := fs.String("rules-dir", "/var/lib/vpn-manager/rules", "persistent rule snapshot directory")
+	rulesConfig := fs.String("rules-config", "/etc/vpn-manager/rules.json", "upstream rule sources JSON")
+	singBox := fs.String("sing-box", "sing-box", "Sing-box validator executable")
 	fs.StringVar(&serverFile, "server-config", "/etc/vpn-manager/server.yaml", "server config path")
 	fs.StringVar(&usersFile, "users-config", "/etc/vpn-manager/users.yaml", "users config path")
 	fs.StringVar(&listen, "listen", "127.0.0.1:8080", "listen address")
@@ -149,10 +154,28 @@ func serve(args []string) {
 		log.Error("invalid users config", "error", err)
 		os.Exit(1)
 	}
-	svc := subscription.New(us, sp, profile.New())
-	hs := httpserver.New(listen, svc, log)
+	var rc ruleset.Config
+	if data, err := os.ReadFile(*rulesConfig); err == nil {
+		if err = json.Unmarshal(data, &rc); err != nil {
+			log.Error("invalid rule source configuration", "error", err)
+			os.Exit(1)
+		}
+	} else if !os.IsNotExist(err) {
+		log.Error("read rule sources", "error", err)
+		os.Exit(1)
+	}
+	rm, err := ruleset.New(*rulesDir, *singBox, rc)
+	if err != nil {
+		log.Error("load rule snapshot", "error", err)
+		os.Exit(1)
+	}
+	generator := profile.New()
+	generator.Rules = rm
+	svc := subscription.New(us, sp, generator)
+	hs := httpserver.New(listen, svc, log, rm)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go rm.Run(ctx, log)
 	go func() {
 		<-ctx.Done()
 		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
